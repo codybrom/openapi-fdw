@@ -71,6 +71,15 @@ select * from stations limit 5;
 
 ### Authenticated API
 
+For Supabase, store credentials in Vault:
+
+```sql
+select vault.create_secret('<your_api_key>', 'my_api_key');
+-- returns a secret UUID, e.g. 'a]b2c3d4-...'
+```
+
+Then reference the Vault secret ID:
+
 ```sql
 create server my_api
   foreign data wrapper wasm_wrapper
@@ -81,8 +90,80 @@ create server my_api
     fdw_package_checksum '3f559457ba5c28972fd638e4ae8376e6c5d15051ba9b5bc703ea6295bf24e98f',
     base_url 'https://api.example.com/v1',
     spec_url 'https://api.example.com/openapi.json',
-    api_key_id '<vault_secret_id>'  -- or use api_key for inline key
+    api_key_id '<vault_secret_id>'
   );
+```
+
+Or pass the key inline (for non-Supabase setups):
+
+```sql
+    api_key 'sk-your-api-key-here'
+```
+
+### Manual Table Definition
+
+Instead of `IMPORT FOREIGN SCHEMA`, you can define tables manually for more control:
+
+```sql
+create foreign table api_users (
+    id text,
+    name text,
+    email text,
+    created_at timestamptz,
+    attrs jsonb
+)
+server my_api
+options (
+    endpoint '/users',
+    rowid_column 'id'
+);
+
+select id, name, email from api_users limit 10;
+```
+
+### Path Parameters
+
+Endpoint templates like `/users/{user_id}/posts` are substituted from your WHERE clause:
+
+```sql
+create foreign table user_posts (
+    user_id text,
+    id text,
+    title text,
+    body text,
+    attrs jsonb
+)
+server my_api
+options (
+    endpoint '/users/{user_id}/posts',
+    rowid_column 'id'
+);
+
+-- user_id is substituted into the URL path
+select title, body from user_posts where user_id = '123';
+```
+
+### GeoJSON / Nested Responses
+
+Use `response_path` and `object_path` to dig into wrapped or nested response structures:
+
+```sql
+create foreign table zone_alerts (
+    zone_id text,
+    event text,
+    headline text,
+    severity text
+)
+server weather_api
+options (
+    endpoint '/alerts/active/zone/{zone_id}',
+    response_path '/features',
+    object_path '/properties'
+);
+
+select event, severity, headline
+from zone_alerts
+where zone_id = 'OKC143';
 ```
 
 ## Server Options
