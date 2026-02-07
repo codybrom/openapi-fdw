@@ -290,6 +290,9 @@ impl OpenApiFdw {
             }
 
             if let Some(value) = Self::qual_value_to_string(qual) {
+                // Store query param for injection back into rows
+                // (so PostgreSQL's WHERE filter passes even if the API doesn't echo it back)
+                extracted_params.insert(field_lower, value.clone());
                 params.push(format!(
                     "{}={}",
                     urlencoding::encode(&qual.field()),
