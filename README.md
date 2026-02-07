@@ -85,6 +85,51 @@ create server my_api
   );
 ```
 
+## Server Options
+
+| Option | Required | Default | Description |
+|--------|----------|---------|-------------|
+| `base_url` | yes* | | API base URL. *Optional if `spec_url` provides servers. |
+| `spec_url` | no | | URL to OpenAPI 3.0+ JSON spec. Required for `IMPORT FOREIGN SCHEMA`. |
+| `api_key` | no | | API key (inline) |
+| `api_key_id` | no | | Vault secret ID for API key |
+| `bearer_token` | no | | Bearer token (inline) |
+| `bearer_token_id` | no | | Vault secret ID for bearer token |
+| `api_key_header` | no | `Authorization` | Header name for API key |
+| `api_key_prefix` | no | `Bearer` | Prefix before key value |
+| `user_agent` | no | | Custom User-Agent header |
+| `accept` | no | | Accept header for content negotiation |
+| `headers` | no | | Custom headers as JSON object, e.g. `'{"X-Custom": "value"}'` |
+| `page_size` | no | `0` | Records per page (`0` = no limit param sent) |
+| `page_size_param` | no | `limit` | Query param name for page size |
+| `cursor_param` | no | `after` | Query param name for pagination cursor |
+
+## Table Options
+
+| Option | Required | Default | Description |
+|--------|----------|---------|-------------|
+| `endpoint` | yes | | API path. Supports `{param}` substitution from WHERE clauses. |
+| `rowid_column` | no | `id` | Row ID column for single-resource access |
+| `response_path` | no | | JSON pointer to data array, e.g. `/data`, `/features` |
+| `object_path` | no | | JSON pointer into each row, e.g. `/properties` for GeoJSON |
+| `cursor_path` | no | | JSON pointer to next-page cursor in response |
+| `cursor_param` | no | | Override server-level `cursor_param` |
+| `page_size_param` | no | | Override server-level `page_size_param` |
+| `page_size` | no | | Override server-level `page_size` |
+
+### Special Columns
+
+- **`attrs`** (jsonb) — automatically added to all imported tables; contains the full raw JSON response for each row
+- Any column matching a `{path_param}` in the endpoint gets the WHERE clause value injected back into the result
+
+### Auto-detection
+
+The FDW automatically detects:
+
+- **Pagination** — cursor-based (`has_more` + cursor fields), URL-based (`next` link), or offset-based
+- **Response wrapping** — unwraps common keys: `data`, `results`, `items`, `records`, `entries`, `features`
+- **Column names** — `camelCase` in the API response maps to `snake_case` PostgreSQL columns
+
 ## Development
 
 ### Building
