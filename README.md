@@ -169,7 +169,7 @@ where zone_id = 'OKC143';
 ## Server Options
 
 | Option | Required | Default | Description |
-|--------|----------|---------|-------------|
+| -------- | ---------- | --------- | ------------- |
 | `base_url` | yes* | | API base URL. *Optional if `spec_url` provides servers. |
 | `spec_url` | no | | URL to OpenAPI 3.0+ JSON spec. Required for `IMPORT FOREIGN SCHEMA`. |
 | `api_key` | no | | API key (inline) |
@@ -188,7 +188,7 @@ where zone_id = 'OKC143';
 ## Table Options
 
 | Option | Required | Default | Description |
-|--------|----------|---------|-------------|
+| -------- | ---------- | --------- | ------------- |
 | `endpoint` | yes | | API path. Supports `{param}` substitution from WHERE clauses. |
 | `rowid_column` | no | `id` | Row ID column for single-resource access |
 | `response_path` | no | | JSON pointer to data array, e.g. `/data`, `/features` |
