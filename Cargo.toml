@@ -1,0 +1,29 @@
+[package]
+name = "openapi_fdw"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+strip = "debuginfo"
+lto = true
+
+[dependencies]
+wit-bindgen-rt = "0.41.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+urlencoding = "2.1"
+
+[package.metadata.component]
+package = "supabase:openapi-fdw"
+
+[package.metadata.component.dependencies]
+
+[package.metadata.component.target]
+path = "wit"
+
+[package.metadata.component.target.dependencies]
+"supabase:wrappers" = { path = "./supabase-wrappers-wit" }

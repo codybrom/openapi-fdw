@@ -1,0 +1,105 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+' # Push events to matching tag, e.g. v0.1.0
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create Wasm FDW Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal --default-toolchain 1.88.0 && \
+            rustup --version && \
+            rustc --version && \
+            cargo --version
+
+          rustup target add wasm32-unknown-unknown
+          cargo install --locked cargo-component --version 0.21.1
+          rustup component add rustfmt
+          cargo install --list
+
+      - name: Build Wasm FDW
+        run: |
+          cargo component build --release --target wasm32-unknown-unknown
+
+      - name: Calculate Wasm file checksum
+        uses: jmgilman/actions-generate-checksum@v1
+        with:
+          method: sha256
+          output: checksum.txt
+          patterns: |
+            ./target/wasm32-unknown-unknown/release/*.wasm
+
+      - name: Get project metadata JSON
+        id: metadata
+        run: |
+          METADATA_JSON=`cargo metadata --format-version 1 --no-deps --offline`
+          echo "METADATA_JSON=$METADATA_JSON" >> "$GITHUB_OUTPUT"
+
+      - name: Extract package info
+        id: extract
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          PROJECT="${{ fromJson(steps.metadata.outputs.METADATA_JSON).packages[0].name }}"
+          PACKAGE="${{ fromJson(steps.metadata.outputs.METADATA_JSON).packages[0].metadata.component.package }}"
+          VERSION=`echo "${TAG}" | sed -E 's/v(.*)/\1/'`
+          CHECKSUM=`head -1 checksum.txt | sed -E 's/^(.*) .*/\1/'`
+          echo "PROJECT=$PROJECT" >> "$GITHUB_OUTPUT"
+          echo "PACKAGE=$PACKAGE" >> "$GITHUB_OUTPUT"
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "CHECKSUM=$CHECKSUM" >> "$GITHUB_OUTPUT"
+
+      - name: Create README.txt
+        env:
+          PROJECT: ${{ steps.extract.outputs.PROJECT }}
+          PACKAGE: ${{ steps.extract.outputs.PACKAGE }}
+          VERSION: ${{ steps.extract.outputs.VERSION }}
+          CHECKSUM: ${{ steps.extract.outputs.CHECKSUM }}
+        run: |
+          cat > README.txt <<EOF
+          To use this Wasm foreign data wrapper, create a foreign server like below:
+
+          create extension if not exists wrappers with schema extensions;
+
+          create foreign data wrapper wasm_wrapper
+            handler wasm_fdw_handler
+            validator wasm_fdw_validator;
+
+          create server my_api_server
+            foreign data wrapper wasm_wrapper
+            options (
+              fdw_package_url 'https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/${PROJECT}.wasm',
+              fdw_package_name '${PACKAGE}',
+              fdw_package_version '${VERSION}',
+              fdw_package_checksum '${CHECKSUM}',
+              base_url 'https://api.example.com',
+              spec_url 'https://api.example.com/openapi.json'
+            );
+
+          -- Auto-generate tables from the OpenAPI spec
+          import foreign schema openapi from server my_api_server into public;
+
+          For more details, visit https://github.com/${GITHUB_REPOSITORY}
+          EOF
+
+      - name: Create release
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          make_latest: true
+          files: |
+            README.txt
+            checksum.txt
+            ./target/wasm32-unknown-unknown/release/*.wasm
