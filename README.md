@@ -26,10 +26,9 @@ create foreign data wrapper wasm_wrapper
 create server my_api_server
   foreign data wrapper wasm_wrapper
   options (
-    fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.1.1/openapi_fdw.wasm',
+    fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.1.2/openapi_fdw.wasm',
     fdw_package_name 'supabase:openapi-fdw',
-    fdw_package_version '0.1.1',
-    fdw_package_checksum '8feb9ee90eb61e36b76bc751364f08d67720e4a83bf121872e91e8005e3f8916',
+    fdw_package_version '0.1.2',
     base_url 'https://api.example.com',
     spec_url 'https://api.example.com/openapi.json'
   );
@@ -55,10 +54,9 @@ select * from users limit 10;
 create server weather_api
   foreign data wrapper wasm_wrapper
   options (
-    fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.1.1/openapi_fdw.wasm',
+    fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.1.2/openapi_fdw.wasm',
     fdw_package_name 'supabase:openapi-fdw',
-    fdw_package_version '0.1.1',
-    fdw_package_checksum '8feb9ee90eb61e36b76bc751364f08d67720e4a83bf121872e91e8005e3f8916',
+    fdw_package_version '0.1.2',
     base_url 'https://api.weather.gov',
     spec_url 'https://api.weather.gov/openapi.json',
     user_agent 'openapi-fdw'
@@ -84,10 +82,9 @@ Then reference the Vault secret ID:
 create server my_api
   foreign data wrapper wasm_wrapper
   options (
-    fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.1.1/openapi_fdw.wasm',
+    fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.1.2/openapi_fdw.wasm',
     fdw_package_name 'supabase:openapi-fdw',
-    fdw_package_version '0.1.1',
-    fdw_package_checksum '8feb9ee90eb61e36b76bc751364f08d67720e4a83bf121872e91e8005e3f8916',
+    fdw_package_version '0.1.2',
     base_url 'https://api.example.com/v1',
     spec_url 'https://api.example.com/openapi.json',
     api_key_id '<vault_secret_id>'
@@ -235,5 +232,6 @@ cargo test
 
 | Version | Date       | Notes                                                |
 | ------- | ---------- | ---------------------------------------------------- |
+| 0.1.2   | 2026-02-06 | Fix: prefer WHERE clause value for query/path param columns |
 | 0.1.1   | 2026-02-06 | Fix: inject query param values back into result rows |
 | 0.1.0   | 2026-01-25 | Initial version                                      |
