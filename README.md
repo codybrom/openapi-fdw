@@ -29,6 +29,7 @@ create server my_api_server
     fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.1.2/openapi_fdw.wasm',
     fdw_package_name 'supabase:openapi-fdw',
     fdw_package_version '0.1.2',
+    fdw_package_checksum 'fcdfff5791eb208b3a2d93985ff67b98891b9748128f02c6cc8ad5e9028d762c',
     base_url 'https://api.example.com',
     spec_url 'https://api.example.com/openapi.json'
   );
@@ -57,6 +58,7 @@ create server weather_api
     fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.1.2/openapi_fdw.wasm',
     fdw_package_name 'supabase:openapi-fdw',
     fdw_package_version '0.1.2',
+    fdw_package_checksum 'fcdfff5791eb208b3a2d93985ff67b98891b9748128f02c6cc8ad5e9028d762c',
     base_url 'https://api.weather.gov',
     spec_url 'https://api.weather.gov/openapi.json',
     user_agent 'openapi-fdw'
@@ -85,6 +87,7 @@ create server my_api
     fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.1.2/openapi_fdw.wasm',
     fdw_package_name 'supabase:openapi-fdw',
     fdw_package_version '0.1.2',
+    fdw_package_checksum 'fcdfff5791eb208b3a2d93985ff67b98891b9748128f02c6cc8ad5e9028d762c',
     base_url 'https://api.example.com/v1',
     spec_url 'https://api.example.com/openapi.json',
     api_key_id '<vault_secret_id>'
