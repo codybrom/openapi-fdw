@@ -233,8 +233,8 @@ cargo test
 
 ## Changelog
 
-| Version | Date       | Notes                                                |
-| ------- | ---------- | ---------------------------------------------------- |
+| Version | Date       | Notes                                                       |
+| ------- | ---------- | ----------------------------------------------------------- |
 | 0.1.2   | 2026-02-06 | Fix: prefer WHERE clause value for query/path param columns |
-| 0.1.1   | 2026-02-06 | Fix: inject query param values back into result rows |
-| 0.1.0   | 2026-01-25 | Initial version                                      |
+| 0.1.1   | 2026-02-06 | Fix: inject query param values back into result rows        |
+| 0.1.0   | 2026-01-25 | Initial version                                             |
