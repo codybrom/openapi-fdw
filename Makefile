@@ -1,3 +1,7 @@
+SHELL := /bin/bash
+export PATH := $(HOME)/.cargo/bin:$(PATH)
+export RUSTUP_HOME := $(HOME)/.rustup
+
 .PHONY: fmt clippy test build check
 
 fmt:
