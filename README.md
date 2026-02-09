@@ -1,5 +1,7 @@
 # OpenAPI WASM Foreign Data Wrapper
 
+> **Note:** This standalone repository will be archived once the OpenAPI FDW is merged into [supabase/wrappers](https://github.com/supabase/wrappers) ([PR #566](https://github.com/supabase/wrappers/pull/566)). Future releases will be published from the main wrappers repo. Documentation will move to [fdw.dev](https://fdw.dev/).
+
 This is a WASM-based Foreign Data Wrapper (FDW) for integrating any OpenAPI 3.0+ compliant REST API into PostgreSQL through Supabase Wrappers.
 
 Point this at an OpenAPI spec and query the API with SQL. The FDW parses the spec, figures out the endpoints and response schemas, and lets you `IMPORT FOREIGN SCHEMA` to generate tables automatically.
