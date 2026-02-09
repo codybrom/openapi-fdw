@@ -26,10 +26,10 @@ create foreign data wrapper wasm_wrapper
 create server my_api_server
   foreign data wrapper wasm_wrapper
   options (
-    fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.1.3/openapi_fdw.wasm',
+    fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.1.4/openapi_fdw.wasm',
     fdw_package_name 'supabase:openapi-fdw',
-    fdw_package_version '0.1.3',
-    fdw_package_checksum '711002e9d19136320f84ee7e166fddaf3b5abd91d36ec85dc64512027cce00c2',
+    fdw_package_version '0.1.4',
+    fdw_package_checksum '4da6825be678a990623e213f205ef50d57517ab51aa12023b2fb54dd4e604ee0',
     base_url 'https://api.example.com',
     spec_url 'https://api.example.com/openapi.json'
   );
@@ -55,10 +55,10 @@ select * from users limit 10;
 create server weather_api
   foreign data wrapper wasm_wrapper
   options (
-    fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.1.3/openapi_fdw.wasm',
+    fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.1.4/openapi_fdw.wasm',
     fdw_package_name 'supabase:openapi-fdw',
-    fdw_package_version '0.1.3',
-    fdw_package_checksum '711002e9d19136320f84ee7e166fddaf3b5abd91d36ec85dc64512027cce00c2',
+    fdw_package_version '0.1.4',
+    fdw_package_checksum '4da6825be678a990623e213f205ef50d57517ab51aa12023b2fb54dd4e604ee0',
     base_url 'https://api.weather.gov',
     spec_url 'https://api.weather.gov/openapi.json',
     user_agent 'openapi-fdw'
@@ -84,10 +84,10 @@ Then reference the Vault secret ID:
 create server my_api
   foreign data wrapper wasm_wrapper
   options (
-    fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.1.3/openapi_fdw.wasm',
+    fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.1.4/openapi_fdw.wasm',
     fdw_package_name 'supabase:openapi-fdw',
-    fdw_package_version '0.1.3',
-    fdw_package_checksum '711002e9d19136320f84ee7e166fddaf3b5abd91d36ec85dc64512027cce00c2',
+    fdw_package_version '0.1.4',
+    fdw_package_checksum '4da6825be678a990623e213f205ef50d57517ab51aa12023b2fb54dd4e604ee0',
     base_url 'https://api.example.com/v1',
     spec_url 'https://api.example.com/openapi.json',
     api_key_id '<vault_secret_id>'
@@ -184,6 +184,7 @@ where zone_id = 'OKC143';
 | `page_size` | no | `0` | Records per page (`0` = no limit param sent) |
 | `page_size_param` | no | `limit` | Query param name for page size |
 | `cursor_param` | no | `after` | Query param name for pagination cursor |
+| `include_attrs` | no | `true` | Include `attrs` jsonb column in `IMPORT FOREIGN SCHEMA` output. Set to `'false'` to omit. |
 
 ## Table Options
 
@@ -235,6 +236,7 @@ cargo test
 
 | Version | Date       | Notes                                                       |
 | ------- | ---------- | ----------------------------------------------------------- |
+| 0.1.4   | 2026-02-09 | Type coercion, auth validation, table naming, URL fixes, include_attrs option |
 | 0.1.3   | 2026-02-07 | Perf: avoid cloning JSON response data during row extraction |
 | 0.1.2   | 2026-02-06 | Fix: prefer WHERE clause value for query/path param columns |
 | 0.1.1   | 2026-02-06 | Fix: inject query param values back into result rows        |
