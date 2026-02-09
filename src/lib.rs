@@ -235,7 +235,7 @@ impl OpenApiFdw {
                 missing_params.join(", "),
                 missing_params
                     .iter()
-                    .map(|p| format!("{} = '<value>'", p))
+                    .map(|p| format!("{p} = '<value>'"))
                     .collect::<Vec<_>>()
                     .join(" AND ")
             ));
