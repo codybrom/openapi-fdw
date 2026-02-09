@@ -24,7 +24,7 @@ jobs:
         run: cargo component build --release --target wasm32-unknown-unknown
 
       - name: Format check
-        run: cargo fmt --check
+        run: cargo fmt && git diff --exit-code
 
       - name: Clippy
         run: RUSTFLAGS="-D warnings" cargo clippy --all --tests --no-deps
