@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    name: Format, Clippy & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal --component rustfmt,clippy
+          rustup default 1.88.0
+          rustup target add wasm32-unknown-unknown
+          cargo install --locked cargo-component --version 0.21.1
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Generate bindings
+        run: cargo component build --release --target wasm32-unknown-unknown
+
+      - name: Clippy
+        run: RUSTFLAGS="-D warnings" cargo clippy --all --tests --no-deps
+
+      - name: Test
+        run: cargo test
