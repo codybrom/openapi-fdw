@@ -20,11 +20,11 @@ jobs:
           rustup target add wasm32-unknown-unknown
           cargo install --locked cargo-component --version 0.21.1
 
+      - name: Build (generates bindings)
+        run: cargo component build --release --target wasm32-unknown-unknown
+
       - name: Format check
         run: cargo fmt --check
-
-      - name: Generate bindings
-        run: cargo component build --release --target wasm32-unknown-unknown
 
       - name: Clippy
         run: RUSTFLAGS="-D warnings" cargo clippy --all --tests --no-deps
