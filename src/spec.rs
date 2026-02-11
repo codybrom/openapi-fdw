@@ -7,6 +7,86 @@ use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 
+/// Raw schema for deserialization — handles OpenAPI 3.1 type arrays.
+///
+/// OpenAPI 3.1 changed `type` from a string to potentially an array:
+/// - 3.0: `"type": "string"` with `"nullable": true`
+/// - 3.1: `"type": ["string", "null"]`
+///
+/// This intermediate struct captures the raw `type` field, then `From<RawSchema>`
+/// extracts the actual type and sets `nullable` accordingly.
+#[derive(Debug, Deserialize)]
+struct RawSchema {
+    #[serde(rename = "type")]
+    #[serde(default)]
+    schema_type: Option<JsonValue>,
+    #[serde(default)]
+    format: Option<String>,
+    #[serde(default)]
+    properties: HashMap<String, Schema>,
+    #[serde(default)]
+    items: Option<Box<Schema>>,
+    #[serde(rename = "$ref")]
+    #[serde(default)]
+    reference: Option<String>,
+    #[serde(default)]
+    required: Vec<String>,
+    #[serde(default)]
+    nullable: bool,
+    #[serde(rename = "writeOnly")]
+    #[serde(default)]
+    write_only: bool,
+    #[serde(rename = "allOf")]
+    #[serde(default)]
+    all_of: Vec<Schema>,
+    #[serde(rename = "oneOf")]
+    #[serde(default)]
+    one_of: Vec<Schema>,
+    #[serde(rename = "anyOf")]
+    #[serde(default)]
+    any_of: Vec<Schema>,
+}
+
+impl From<RawSchema> for Schema {
+    fn from(raw: RawSchema) -> Self {
+        let (schema_type, type_has_null) = match raw.schema_type {
+            None => (None, false),
+            Some(JsonValue::String(s)) => (Some(s), false),
+            Some(JsonValue::Array(arr)) => {
+                let has_null = arr.iter().any(|v| v.as_str() == Some("null"));
+                let non_null_types: Vec<&str> = arr
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .filter(|s| *s != "null")
+                    .collect();
+                // Multiple non-null types (e.g., ["string", "integer"]) → None (maps to jsonb)
+                let actual = if non_null_types.len() == 1 {
+                    Some(non_null_types[0].to_string())
+                } else {
+                    None
+                };
+                (actual, has_null)
+            }
+            Some(_) => (None, false),
+        };
+
+        Schema {
+            schema_type,
+            format: raw.format,
+            properties: raw.properties,
+            items: raw.items,
+            reference: raw.reference,
+            required: raw.required,
+            // nullable if explicitly set OR if type array contains "null"
+            nullable: raw.nullable || type_has_null,
+            write_only: raw.write_only,
+            all_of: raw.all_of,
+            one_of: raw.one_of,
+            any_of: raw.any_of,
+        }
+    }
+}
+
 /// Represents an `OpenAPI` 3.0+ specification
 #[derive(Debug, Deserialize)]
 pub struct OpenApiSpec {
@@ -33,13 +113,23 @@ struct Info {
 #[derive(Debug, Deserialize)]
 pub struct Server {
     pub url: String,
+    #[serde(default)]
+    pub variables: HashMap<String, ServerVariable>,
 }
 
-/// Path item (only GET operations are used for foreign tables)
+/// Server variable with a default value for URL template substitution
+#[derive(Debug, Deserialize)]
+pub struct ServerVariable {
+    pub default: String,
+}
+
+/// Path item (GET and POST operations are used for foreign tables)
 #[derive(Debug, Deserialize)]
 pub struct PathItem {
     #[serde(default)]
     pub get: Option<Operation>,
+    #[serde(default)]
+    pub post: Option<Operation>,
 }
 
 /// Operation definition
@@ -53,6 +143,9 @@ pub struct Operation {
 /// Response definition
 #[derive(Debug, Deserialize)]
 pub struct Response {
+    #[serde(rename = "$ref")]
+    #[serde(default)]
+    pub reference: Option<String>,
     #[serde(default)]
     pub content: HashMap<String, MediaType>,
 }
@@ -64,32 +157,19 @@ pub struct MediaType {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(from = "RawSchema")]
 #[allow(clippy::struct_field_names)]
 pub struct Schema {
-    #[serde(rename = "type")]
-    #[serde(default)]
     pub schema_type: Option<String>,
-    #[serde(default)]
     pub format: Option<String>,
-    #[serde(default)]
     pub properties: HashMap<String, Self>,
-    #[serde(default)]
     pub items: Option<Box<Self>>,
-    #[serde(rename = "$ref")]
-    #[serde(default)]
     pub reference: Option<String>,
-    #[serde(default)]
     pub required: Vec<String>,
-    #[serde(default)]
     pub nullable: bool,
-    #[serde(rename = "allOf")]
-    #[serde(default)]
+    pub write_only: bool,
     pub all_of: Vec<Self>,
-    #[serde(rename = "oneOf")]
-    #[serde(default)]
     pub one_of: Vec<Self>,
-    #[serde(rename = "anyOf")]
-    #[serde(default)]
     pub any_of: Vec<Self>,
 }
 
@@ -97,6 +177,8 @@ pub struct Schema {
 pub struct Components {
     #[serde(default)]
     pub schemas: HashMap<String, Schema>,
+    #[serde(default)]
+    pub responses: HashMap<String, Response>,
 }
 
 impl OpenApiSpec {
@@ -131,12 +213,18 @@ impl OpenApiSpec {
         Ok(spec)
     }
 
-    /// Get the base URL from the spec (first server URL)
-    pub fn base_url(&self) -> Option<&str> {
-        self.servers.first().map(|s| s.url.as_str())
+    /// Get the base URL from the spec (first server URL), substituting any variables
+    pub fn base_url(&self) -> Option<String> {
+        self.servers.first().map(|s| {
+            let mut url = s.url.clone();
+            for (name, var) in &s.variables {
+                url = url.replace(&format!("{{{name}}}"), &var.default);
+            }
+            url
+        })
     }
 
-    /// Get all endpoint paths that support GET operations (for querying).
+    /// Get all endpoint paths that support GET or POST operations (for querying).
     ///
     /// Parameterized paths (e.g., `/users/{id}`, `/users/{user_id}/posts`) are
     /// excluded because they require path parameter values from WHERE clauses at
@@ -154,32 +242,62 @@ impl OpenApiSpec {
             }
 
             if let Some(ref op) = path_item.get {
-                let response_schema = Self::get_response_schema(op);
+                let response_schema = self.get_response_schema(op);
                 endpoints.push(EndpointInfo {
                     path: path.clone(),
+                    method: "GET".to_string(),
+                    response_schema,
+                });
+            }
+
+            if let Some(ref op) = path_item.post {
+                let response_schema = self.get_response_schema(op);
+                endpoints.push(EndpointInfo {
+                    path: path.clone(),
+                    method: "POST".to_string(),
                     response_schema,
                 });
             }
         }
 
-        endpoints.sort_by(|a, b| a.path.cmp(&b.path));
+        endpoints.sort_by(|a, b| a.path.cmp(&b.path).then(a.method.cmp(&b.method)));
         endpoints
     }
 
-    /// Get the response schema for a successful response (200, 201, or default)
-    fn get_response_schema(op: &Operation) -> Option<Schema> {
+    /// Get the response schema for a successful response (200, 201, 2XX, or default)
+    fn get_response_schema(&self, op: &Operation) -> Option<Schema> {
         let response = op
             .responses
             .get("200")
             .or_else(|| op.responses.get("201"))
+            .or_else(|| op.responses.get("2XX"))
             .or_else(|| op.responses.get("default"))?;
 
-        let media_type = response
+        // Resolve $ref at the response level (e.g., "$ref": "#/components/responses/Success")
+        let resolved_response = response
+            .reference
+            .as_ref()
+            .and_then(|r| self.resolve_response_ref(r))
+            .unwrap_or(response);
+
+        let media_type = resolved_response
             .content
-            .get("application/json")
-            .or_else(|| response.content.values().next())?;
+            .iter()
+            .find(|(k, _)| k.starts_with("application/json"))
+            .map(|(_, v)| v)
+            .or_else(|| resolved_response.content.values().next())?;
 
         media_type.schema.clone()
+    }
+
+    /// Resolve a $ref to a response in components.responses
+    fn resolve_response_ref(&self, reference: &str) -> Option<&Response> {
+        let parts: Vec<&str> = reference.trim_start_matches("#/").split('/').collect();
+        if parts.len() == 3 && parts[0] == "components" && parts[1] == "responses" {
+            self.components.as_ref()?.responses.get(parts[2])
+        } else {
+            None
+        }
     }
 
     /// Resolve a $ref to its schema
@@ -212,7 +330,23 @@ impl OpenApiSpec {
         // First resolve any $ref
         if let Some(ref reference) = schema.reference {
             if let Some(resolved) = self.resolve_ref(reference) {
-                return self.resolve_schema_with_depth(resolved, depth + 1);
+                let mut result = self.resolve_schema_with_depth(resolved, depth + 1);
+                // Merge non-default siblings (OpenAPI 3.1 $ref with siblings)
+                if schema.nullable {
+                    result.nullable = true;
+                }
+                if schema.write_only {
+                    result.write_only = true;
+                }
+                for (name, prop) in &schema.properties {
+                    result.properties.insert(name.clone(), prop.clone());
+                }
+                if !schema.required.is_empty() {
+                    result.required.extend(schema.required.iter().cloned());
+                    result.required.sort();
+                    result.required.dedup();
+                }
+                return result;
             }
         }
 
@@ -243,14 +377,19 @@ impl OpenApiSpec {
         depth: usize,
     ) -> Schema {
         let mut merged = Schema {
-            schema_type: Some("object".to_string()),
             properties: HashMap::new(),
             required: Vec::new(),
             ..Default::default()
         };
 
+        let mut has_any_properties = false;
+
         for sub_schema in schemas {
             let resolved = self.resolve_schema_with_depth(sub_schema, depth);
+
+            if !resolved.properties.is_empty() {
+                has_any_properties = true;
+            }
 
             // Merge properties
             for (name, mut prop_schema) in resolved.properties {
@@ -273,6 +412,13 @@ impl OpenApiSpec {
             }
         }
 
+        // Only set type to "object" if at least one sub-schema has properties.
+        // Primitive composition (e.g., oneOf: [{type: "string"}, {type: "integer"}])
+        // should produce None (→ jsonb), not "object".
+        if has_any_properties {
+            merged.schema_type = Some("object".to_string());
+        }
+
         // Deduplicate required fields
         merged.required.sort();
         merged.required.dedup();
@@ -285,6 +431,7 @@ impl OpenApiSpec {
 #[derive(Debug)]
 pub struct EndpointInfo {
     pub path: String,
+    pub method: String,
     pub response_schema: Option<Schema>,
 }
 
@@ -293,325 +440,25 @@ impl EndpointInfo {
     ///
     /// Uses the full path to avoid collisions (e.g., `/v1/users` and `/v2/users`
     /// become `v1_users` and `v2_users` instead of both becoming `users`).
+    /// POST endpoints get a `_post` suffix to avoid collisions with GET tables.
     pub fn table_name(&self) -> String {
         let cleaned = self.path.trim_matches('/');
 
-        if cleaned.is_empty() {
-            return "unknown".to_string();
-        }
+        let base = if cleaned.is_empty() {
+            "unknown".to_string()
+        } else {
+            // Join path segments with '_' and convert kebab-case to snake_case
+            cleaned.replace(['/', '-'], "_")
+        };
 
-        // Join path segments with '_' and convert kebab-case to snake_case
-        cleaned.replace(['/', '-'], "_")
+        if self.method == "POST" {
+            format!("{base}_post")
+        } else {
+            base
+        }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_minimal_spec() {
-        let spec_json = r#"{
-            "openapi": "3.0.0",
-            "info": {"title": "Test API", "version": "1.0"},
-            "paths": {}
-        }"#;
-
-        let spec = OpenApiSpec::from_str(spec_json).unwrap();
-        assert_eq!(spec.openapi, "3.0.0");
-        assert_eq!(spec.info.title, "Test API");
-    }
-
-    #[test]
-    fn test_endpoint_table_name() {
-        let endpoint = EndpointInfo {
-            path: "/api/v1/user-accounts".to_string(),
-            response_schema: None,
-        };
-        assert_eq!(endpoint.table_name(), "api_v1_user_accounts");
-
-        // Single segment
-        let endpoint = EndpointInfo {
-            path: "/users".to_string(),
-            response_schema: None,
-        };
-        assert_eq!(endpoint.table_name(), "users");
-
-        // Collision avoidance: different versions produce different names
-        let v1 = EndpointInfo {
-            path: "/v1/users".to_string(),
-            response_schema: None,
-        };
-        let v2 = EndpointInfo {
-            path: "/v2/users".to_string(),
-            response_schema: None,
-        };
-        assert_ne!(v1.table_name(), v2.table_name());
-
-        // Empty path
-        let endpoint = EndpointInfo {
-            path: "/".to_string(),
-            response_schema: None,
-        };
-        assert_eq!(endpoint.table_name(), "unknown");
-    }
-
-    #[test]
-    fn test_resolve_ref() {
-        let spec_json = r#"{
-            "openapi": "3.0.0",
-            "info": {"title": "Test", "version": "1.0"},
-            "paths": {},
-            "components": {
-                "schemas": {
-                    "User": {
-                        "type": "object",
-                        "properties": {
-                            "id": {"type": "string"},
-                            "name": {"type": "string"}
-                        },
-                        "required": ["id"]
-                    }
-                }
-            }
-        }"#;
-
-        let spec = OpenApiSpec::from_str(spec_json).unwrap();
-        let user_schema = spec.resolve_ref("#/components/schemas/User").unwrap();
-
-        assert_eq!(user_schema.schema_type, Some("object".to_string()));
-        assert!(user_schema.properties.contains_key("id"));
-        assert!(user_schema.properties.contains_key("name"));
-        assert!(user_schema.required.contains(&"id".to_string()));
-    }
-
-    #[test]
-    fn test_allof_merges_properties() {
-        let spec_json = r##"{
-            "openapi": "3.0.0",
-            "info": {"title": "Test", "version": "1.0"},
-            "paths": {},
-            "components": {
-                "schemas": {
-                    "Base": {
-                        "type": "object",
-                        "properties": {
-                            "id": {"type": "string"}
-                        },
-                        "required": ["id"]
-                    },
-                    "Extended": {
-                        "allOf": [
-                            {"$ref": "#/components/schemas/Base"},
-                            {
-                                "type": "object",
-                                "properties": {
-                                    "name": {"type": "string"},
-                                    "email": {"type": "string"}
-                                },
-                                "required": ["name"]
-                            }
-                        ]
-                    }
-                }
-            }
-        }"##;
-
-        let spec = OpenApiSpec::from_str(spec_json).unwrap();
-        let extended = spec.resolve_ref("#/components/schemas/Extended").unwrap();
-        let resolved = spec.resolve_schema(extended);
-
-        // Should have all properties from both schemas
-        assert!(resolved.properties.contains_key("id"));
-        assert!(resolved.properties.contains_key("name"));
-        assert!(resolved.properties.contains_key("email"));
-
-        // Required from both should be merged
-        assert!(resolved.required.contains(&"id".to_string()));
-        assert!(resolved.required.contains(&"name".to_string()));
-    }
-
-    #[test]
-    fn test_oneof_merges_as_nullable() {
-        let spec_json = r#"{
-            "openapi": "3.0.0",
-            "info": {"title": "Test", "version": "1.0"},
-            "paths": {},
-            "components": {
-                "schemas": {
-                    "Response": {
-                        "oneOf": [
-                            {
-                                "type": "object",
-                                "properties": {
-                                    "user_id": {"type": "string"},
-                                    "user_name": {"type": "string"}
-                                },
-                                "required": ["user_id"]
-                            },
-                            {
-                                "type": "object",
-                                "properties": {
-                                    "org_id": {"type": "string"},
-                                    "org_name": {"type": "string"}
-                                },
-                                "required": ["org_id"]
-                            }
-                        ]
-                    }
-                }
-            }
-        }"#;
-
-        let spec = OpenApiSpec::from_str(spec_json).unwrap();
-        let response = spec.resolve_ref("#/components/schemas/Response").unwrap();
-        let resolved = spec.resolve_schema(response);
-
-        // Should have properties from all variants
-        assert!(resolved.properties.contains_key("user_id"));
-        assert!(resolved.properties.contains_key("user_name"));
-        assert!(resolved.properties.contains_key("org_id"));
-        assert!(resolved.properties.contains_key("org_name"));
-
-        // All properties should be nullable (since we don't know which variant)
-        assert!(resolved.properties.get("user_id").unwrap().nullable);
-        assert!(resolved.properties.get("org_id").unwrap().nullable);
-
-        // Nothing should be required for oneOf
-        assert!(resolved.required.is_empty());
-    }
-
-    #[test]
-    fn test_anyof_merges_as_nullable() {
-        let spec_json = r#"{
-            "openapi": "3.0.0",
-            "info": {"title": "Test", "version": "1.0"},
-            "paths": {},
-            "components": {
-                "schemas": {
-                    "Flexible": {
-                        "anyOf": [
-                            {
-                                "type": "object",
-                                "properties": {
-                                    "name": {"type": "string"}
-                                }
-                            },
-                            {
-                                "type": "object",
-                                "properties": {
-                                    "title": {"type": "string"}
-                                }
-                            }
-                        ]
-                    }
-                }
-            }
-        }"#;
-
-        let spec = OpenApiSpec::from_str(spec_json).unwrap();
-        let flexible = spec.resolve_ref("#/components/schemas/Flexible").unwrap();
-        let resolved = spec.resolve_schema(flexible);
-
-        // Should have properties from all variants
-        assert!(resolved.properties.contains_key("name"));
-        assert!(resolved.properties.contains_key("title"));
-
-        // All should be nullable
-        assert!(resolved.properties.get("name").unwrap().nullable);
-        assert!(resolved.properties.get("title").unwrap().nullable);
-    }
-
-    #[test]
-    fn test_nested_ref_resolution() {
-        let spec_json = r##"{
-            "openapi": "3.0.0",
-            "info": {"title": "Test", "version": "1.0"},
-            "paths": {},
-            "components": {
-                "schemas": {
-                    "Address": {
-                        "type": "object",
-                        "properties": {
-                            "street": {"type": "string"},
-                            "city": {"type": "string"}
-                        }
-                    },
-                    "Person": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string"},
-                            "address": {"$ref": "#/components/schemas/Address"}
-                        }
-                    }
-                }
-            }
-        }"##;
-
-        let spec = OpenApiSpec::from_str(spec_json).unwrap();
-        let person = spec.resolve_ref("#/components/schemas/Person").unwrap();
-        let resolved = spec.resolve_schema(person);
-
-        assert!(resolved.properties.contains_key("name"));
-        assert!(resolved.properties.contains_key("address"));
-
-        // The address property should still have a $ref (we resolve at property level when needed)
-        let address_prop = resolved.properties.get("address").unwrap();
-        assert!(address_prop.reference.is_some() || !address_prop.properties.is_empty());
-    }
-
-    #[test]
-    fn test_allof_later_schema_overrides_earlier() {
-        // Test that for allOf, later schemas override earlier ones
-        // This is important for inheritance patterns where a child refines a parent's type
-        let spec_json = r##"{
-            "openapi": "3.0.0",
-            "info": {"title": "Test", "version": "1.0"},
-            "paths": {},
-            "components": {
-                "schemas": {
-                    "Base": {
-                        "type": "object",
-                        "properties": {
-                            "status": {"type": "string"},
-                            "id": {"type": "integer"}
-                        }
-                    },
-                    "Refined": {
-                        "allOf": [
-                            {"$ref": "#/components/schemas/Base"},
-                            {
-                                "type": "object",
-                                "properties": {
-                                    "status": {
-                                        "type": "string",
-                                        "format": "enum"
-                                    },
-                                    "extra": {"type": "boolean"}
-                                }
-                            }
-                        ]
-                    }
-                }
-            }
-        }"##;
-
-        let spec = OpenApiSpec::from_str(spec_json).unwrap();
-        let refined = spec.resolve_ref("#/components/schemas/Refined").unwrap();
-        let resolved = spec.resolve_schema(refined);
-
-        // Should have all properties
-        assert!(resolved.properties.contains_key("status"));
-        assert!(resolved.properties.contains_key("id"));
-        assert!(resolved.properties.contains_key("extra"));
-
-        // The 'status' property should be from the later schema (has format: "enum")
-        // The base schema's status has no format, so if we get "enum", the later one won
-        let status_prop = resolved.properties.get("status").unwrap();
-        assert_eq!(
-            status_prop.format,
-            Some("enum".to_string()),
-            "Later allOf schema should override earlier schema's property definition"
-        );
-    }
-}
+#[path = "spec_tests.rs"]
+mod tests;

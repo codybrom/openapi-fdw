@@ -18,7 +18,7 @@ use bindings::{
     supabase::wrappers::{
         http, stats, time,
         types::{
-            Cell, Column, Context, FdwError, FdwResult, ImportForeignSchemaStmt, ImportSchemaType,
+            Cell, Context, FdwError, FdwResult, ImportForeignSchemaStmt, ImportSchemaType,
             OptionsType, Row, TypeOid, Value,
         },
         utils,
@@ -28,8 +28,38 @@ use bindings::{
 use schema::generate_all_tables;
 use spec::OpenApiSpec;
 
+/// How a SQL column name was resolved to a JSON key.
+///
+/// Avoids cloning strings that already exist in [`CachedColumn`] — only the
+/// case-insensitive fallback (rare) needs its own allocation.
+#[derive(Debug, Clone, PartialEq)]
+enum KeyMatch {
+    /// JSON key matches `CachedColumn::name` exactly
+    Exact,
+    /// JSON key matches `CachedColumn::camel_name`
+    CamelCase,
+    /// JSON key matched case-insensitively (stores the original API key)
+    CaseInsensitive(String),
+}
+
+/// Pre-computed column metadata to avoid repeated WASM boundary crossings.
+///
+/// During `iter_scan`, each call to `ctx.get_columns()`, `col.name()`, and
+/// `col.type_oid()` crosses the WASM boundary. By caching these once in
+/// `begin_scan`, we eliminate ~2000 boundary crossings per 100-row scan.
+#[derive(Debug)]
+struct CachedColumn {
+    name: String,
+    type_oid: TypeOid,
+    camel_name: String,
+    lower_name: String,
+    /// Alphanumeric-only lowercase name for normalized matching.
+    /// Strips `@`, `.`, `-`, `$`, etc. so `@id` → `_id` → `id` can match.
+    alnum_name: String,
+}
+
 /// The `OpenAPI` FDW state
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct OpenApiFdw {
     // Configuration from server options
     base_url: String,
@@ -38,6 +68,8 @@ struct OpenApiFdw {
     spec_url: Option<String>,
 
     // Current operation state (from table options)
+    method: http::Method,
+    request_body: String,
     endpoint: String,
     response_path: Option<String>,
     object_path: Option<String>, // Extract nested object from each row (e.g., "/properties" for GeoJSON)
@@ -53,6 +85,9 @@ struct OpenApiFdw {
     next_cursor: Option<String>,
     next_url: Option<String>,
 
+    // API key as query parameter (when api_key_location = 'query')
+    api_key_query: Option<(String, String)>,
+
     // Schema generation options
     include_attrs: bool,
 
@@ -63,9 +98,52 @@ struct OpenApiFdw {
     src_rows: Vec<JsonValue>,
     src_idx: usize,
 
+    // Cached column metadata (populated in begin_scan, avoids WASM crossings in iter_scan)
+    cached_columns: Vec<CachedColumn>,
+    // Pre-resolved JSON key for each cached column (rebuilt per page in make_request)
+    column_key_map: Vec<Option<KeyMatch>>,
+
     // Limit pushdown for early pagination stop
     src_limit: Option<i64>,
     consumed_row_cnt: i64,
+
+    // Debug logging (enabled via server option debug_timing = 'true')
+    debug_timing: bool,
+    scan_row_count: i64,
+}
+
+impl Default for OpenApiFdw {
+    fn default() -> Self {
+        Self {
+            base_url: String::new(),
+            headers: Vec::new(),
+            spec: None,
+            spec_url: None,
+            method: http::Method::Get,
+            request_body: String::new(),
+            endpoint: String::new(),
+            response_path: None,
+            object_path: None,
+            rowid_col: String::new(),
+            cursor_param: String::new(),
+            cursor_path: String::new(),
+            page_size: 0,
+            page_size_param: String::new(),
+            next_cursor: None,
+            next_url: None,
+            api_key_query: None,
+            include_attrs: false,
+            path_params: std::collections::HashMap::new(),
+            src_rows: Vec::new(),
+            src_idx: 0,
+            cached_columns: Vec::new(),
+            column_key_map: Vec::new(),
+            src_limit: None,
+            consumed_row_cnt: 0,
+            debug_timing: false,
+            scan_row_count: 0,
+        }
+    }
 }
 
 /// Global FDW instance pointer.
@@ -151,7 +229,29 @@ impl OpenApiFdw {
         }
     }
 
-    /// Build the URL for a request, handling path parameters and pagination
+    /// Resolve a relative or absolute pagination URL against the base URL and endpoint.
+    ///
+    /// Handles four forms of `next_url`:
+    /// - Absolute URLs (`http://...`, `https://...`) → used as-is
+    /// - Query-only (`?page=2`) → resolves against `base_url + endpoint`
+    /// - Absolute paths (`/items?page=2`) → resolves against `base_url`
+    /// - Bare relative paths (`page/2`) → resolves against `base_url/`
+    fn resolve_pagination_url(&self, next_url: &str) -> String {
+        if next_url.starts_with("http://") || next_url.starts_with("https://") {
+            next_url.to_string()
+        } else if next_url.starts_with('?') {
+            let endpoint_base = self.endpoint.split('?').next().unwrap_or(&self.endpoint);
+            format!("{}{endpoint_base}{next_url}", self.base_url)
+        } else if next_url.starts_with('/') {
+            format!("{}{next_url}", self.base_url)
+        } else {
+            format!("{}/{next_url}", self.base_url)
+        }
+    }
+
+    /// Build the URL for a request, handling path parameters and pagination.
+    ///
+    /// Updates `self.path_params` in place (avoids cloning on pagination).
     ///
     /// Supports endpoint templates like:
     /// - `/users/{user_id}/posts`
@@ -159,98 +259,84 @@ impl OpenApiFdw {
     /// - `/resources/{type}/{id}`
     ///
     /// Path parameters are substituted from WHERE clause quals.
-    /// Returns (url, `path_params`) where `path_params` maps column names to values.
     ///
     /// # Errors
     /// Returns an error if required path parameters are missing from the WHERE clause.
-    fn build_url(
-        &self,
-        ctx: &Context,
-    ) -> Result<(String, std::collections::HashMap<String, String>), String> {
-        // Use next_url for pagination if available
+    fn build_url(&mut self, ctx: &Context) -> Result<String, String> {
+        // Use next_url for pagination if available (path_params unchanged)
         if let Some(ref next_url) = self.next_url {
-            // Handle relative URLs:
-            //  - Absolute URLs are used as-is
-            //  - Query-only (e.g., "?page=2") resolves against base_url + endpoint
-            //  - Absolute paths (e.g., "/items?page=2") resolve against base_url
-            //  - Bare relative paths (e.g., "page/2") resolve against base_url/
-            let url = if next_url.starts_with("http://") || next_url.starts_with("https://") {
-                next_url.clone()
-            } else if next_url.starts_with('?') {
-                let endpoint_base = self.endpoint.split('?').next().unwrap_or(&self.endpoint);
-                format!("{}{endpoint_base}{next_url}", self.base_url)
-            } else if next_url.starts_with('/') {
-                format!("{}{next_url}", self.base_url)
-            } else {
-                format!("{}/{next_url}", self.base_url)
-            };
-            return Ok((url, self.path_params.clone()));
+            return Ok(self.resolve_pagination_url(next_url));
         }
 
         let quals = ctx.get_quals();
-        let mut extracted_params: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
 
-        // Build a map of qual field -> value for path parameter substitution
-        let mut qual_map: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        for qual in &quals {
-            if let Some(value) = Self::qual_value_to_string(qual) {
-                // Store both original and lowercase versions for flexible matching
-                qual_map.insert(qual.field().to_lowercase(), value.clone());
-                qual_map.insert(qual.field(), value);
-            }
-        }
+        // Short-circuit: if endpoint has no {param} templates, skip qual map building
+        let has_path_params = self.endpoint.contains('{');
 
-        // Substitute path parameters in endpoint template
-        // e.g., /users/{user_id}/posts -> /users/123/posts
-        let mut endpoint = self.endpoint.clone();
         let mut path_params_used: Vec<String> = Vec::new();
-        let mut missing_params: Vec<String> = Vec::new();
+        let mut endpoint = self.endpoint.clone();
 
-        // Find all {param} patterns and substitute
-        while let Some(start) = endpoint.find('{') {
-            if let Some(end) = endpoint[start..].find('}') {
-                let param_name = &endpoint[start + 1..start + end];
-                let param_lower = param_name.to_lowercase();
-
-                // Try to find matching qual (case-insensitive)
-                let value = qual_map
-                    .get(&param_lower)
-                    .or_else(|| qual_map.get(param_name));
-
-                if let Some(val) = value {
-                    path_params_used.push(param_lower.clone());
-                    // Store the path param for injection into rows (unencoded for PostgreSQL filter)
-                    extracted_params.insert(param_lower.clone(), val.clone());
-                    endpoint = format!(
-                        "{}{}{}",
-                        &endpoint[..start],
-                        urlencoding::encode(val),
-                        &endpoint[start + end + 1..]
-                    );
-                } else {
-                    // Track missing parameter and remove it from the endpoint to continue
-                    missing_params.push(param_name.to_string());
-                    endpoint = format!("{}{}", &endpoint[..start], &endpoint[start + end + 1..]);
+        if has_path_params {
+            // Build a map of qual field -> value for path parameter substitution
+            let mut qual_map: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            for qual in &quals {
+                if let Some(value) = Self::qual_value_to_string(qual) {
+                    // Store both original and lowercase versions for flexible matching
+                    qual_map.insert(qual.field().to_lowercase(), value.clone());
+                    qual_map.insert(qual.field(), value);
                 }
-            } else {
-                break;
             }
-        }
 
-        // Return error if any required path parameters are missing
-        if !missing_params.is_empty() {
-            return Err(format!(
-                "Missing required path parameter(s) in WHERE clause: {}. \
-                 Add WHERE {} to your query.",
-                missing_params.join(", "),
-                missing_params
-                    .iter()
-                    .map(|p| format!("{p} = '<value>'"))
-                    .collect::<Vec<_>>()
-                    .join(" AND ")
-            ));
+            // Substitute path parameters in endpoint template
+            // e.g., /users/{user_id}/posts -> /users/123/posts
+            let mut missing_params: Vec<String> = Vec::new();
+
+            // Find all {param} patterns and substitute
+            while let Some(start) = endpoint.find('{') {
+                if let Some(end) = endpoint[start..].find('}') {
+                    let param_name = &endpoint[start + 1..start + end];
+                    let param_lower = param_name.to_lowercase();
+
+                    // Try to find matching qual (case-insensitive)
+                    let value = qual_map
+                        .get(&param_lower)
+                        .or_else(|| qual_map.get(param_name));
+
+                    if let Some(val) = value {
+                        path_params_used.push(param_lower.clone());
+                        // Store the path param for injection into rows (unencoded for PostgreSQL filter)
+                        self.path_params.insert(param_lower.clone(), val.clone());
+                        endpoint = format!(
+                            "{}{}{}",
+                            &endpoint[..start],
+                            urlencoding::encode(val),
+                            &endpoint[start + end + 1..]
+                        );
+                    } else {
+                        // Track missing parameter and remove it from the endpoint to continue
+                        missing_params.push(param_name.to_string());
+                        endpoint =
+                            format!("{}{}", &endpoint[..start], &endpoint[start + end + 1..]);
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            // Return error if any required path parameters are missing
+            if !missing_params.is_empty() {
+                return Err(format!(
+                    "Missing required path parameter(s) in WHERE clause: {}. \
+                     Add WHERE {} to your query.",
+                    missing_params.join(", "),
+                    missing_params
+                        .iter()
+                        .map(|p| format!("{p} = '<value>'"))
+                        .collect::<Vec<_>>()
+                        .join(" AND ")
+                ));
+            }
         }
 
         // Check for rowid pushdown for single-resource access
@@ -261,11 +347,9 @@ impl OpenApiFdw {
             }) {
                 if let Some(id) = Self::qual_value_to_string(id_qual) {
                     // Store rowid as path param too
-                    extracted_params.insert(self.rowid_col.to_lowercase(), id.clone());
-                    return Ok((
-                        format!("{}{}/{}", self.base_url, endpoint, id),
-                        extracted_params,
-                    ));
+                    self.path_params
+                        .insert(self.rowid_col.to_lowercase(), id.clone());
+                    return Ok(format!("{}{}/{}", self.base_url, endpoint, id));
                 }
             }
         }
@@ -304,7 +388,7 @@ impl OpenApiFdw {
             if let Some(value) = Self::qual_value_to_string(qual) {
                 // Store query param for injection back into rows
                 // (so PostgreSQL's WHERE filter passes even if the API doesn't echo it back)
-                extracted_params.insert(field_lower, value.clone());
+                self.path_params.insert(field_lower, value.clone());
                 params.push(format!(
                     "{}={}",
                     urlencoding::encode(&qual.field()),
@@ -313,24 +397,32 @@ impl OpenApiFdw {
             }
         }
 
+        // Add API key as query parameter if configured
+        if let Some((ref param_name, ref param_value)) = self.api_key_query {
+            params.push(format!(
+                "{}={}",
+                urlencoding::encode(param_name),
+                urlencoding::encode(param_value)
+            ));
+        }
+
         if !params.is_empty() {
             base.push('?');
             base.push_str(&params.join("&"));
         }
 
-        Ok((base, extracted_params))
+        Ok(base)
     }
 
     /// Make a request to the API with automatic rate limit handling
     fn make_request(&mut self, ctx: &Context) -> FdwResult {
-        let (url, path_params) = self.build_url(ctx)?;
-        self.path_params = path_params;
+        let url = self.build_url(ctx)?;
 
         let req = http::Request {
-            method: http::Method::Get,
+            method: self.method,
             url,
             headers: self.headers.clone(),
-            body: String::default(),
+            body: self.request_body.clone(),
         };
 
         // Retry loop for rate limiting (HTTP 429)
@@ -338,7 +430,10 @@ impl OpenApiFdw {
         const MAX_RETRIES: u32 = 3;
 
         let resp = loop {
-            let resp = http::get(&req)?;
+            let resp = match req.method {
+                http::Method::Post => http::post(&req)?,
+                _ => http::get(&req)?,
+            };
 
             // Handle rate limiting (HTTP 429)
             if resp.status_code == 429 {
@@ -366,6 +461,20 @@ impl OpenApiFdw {
             break resp;
         };
 
+        if self.debug_timing {
+            utils::report_info(&format!(
+                "[openapi_fdw] HTTP {} {} -> {} ({} bytes)",
+                if matches!(req.method, http::Method::Post) {
+                    "POST"
+                } else {
+                    "GET"
+                },
+                req.url,
+                resp.status_code,
+                resp.body.len()
+            ));
+        }
+
         // Handle 404 as empty result (no matching resource)
         if resp.status_code == 404 {
             self.src_rows = Vec::new();
@@ -389,6 +498,9 @@ impl OpenApiFdw {
         self.src_rows = self.extract_data(&mut resp_json)?;
         self.src_idx = 0;
 
+        // Build column key map for O(1) lookups during iter_scan
+        self.build_column_key_map();
+
         Ok(())
     }
 
@@ -411,7 +523,9 @@ impl OpenApiFdw {
 
         // Try common wrapper patterns
         if resp.is_object() {
-            for key in ["data", "results", "items", "records", "entries", "features"] {
+            for key in [
+                "data", "results", "items", "records", "entries", "features", "@graph",
+            ] {
                 if resp.get(key).is_some_and(|d| d.is_array() || d.is_object()) {
                     return Self::json_to_rows(resp[key].take());
                 }
@@ -440,8 +554,12 @@ impl OpenApiFdw {
 
         // Try configured cursor path first
         if !self.cursor_path.is_empty() {
-            if let Some(cursor) = Self::extract_non_empty_string(resp, &self.cursor_path) {
-                self.next_cursor = Some(cursor);
+            if let Some(value) = Self::extract_non_empty_string(resp, &self.cursor_path) {
+                if value.starts_with("http://") || value.starts_with("https://") {
+                    self.next_url = Some(value);
+                } else {
+                    self.next_cursor = Some(value);
+                }
                 return;
             }
         }
@@ -501,6 +619,21 @@ impl OpenApiFdw {
         }
     }
 
+    /// Normalize a date/datetime string for RFC3339 parsing.
+    ///
+    /// OpenAPI `format: "date"` produces `"2024-01-15"` (RFC 3339 `full-date`),
+    /// but `time::parse_from_rfc3339` requires a full datetime. This appends
+    /// `T00:00:00Z` to date-only strings so they parse correctly.
+    fn normalize_datetime(s: &str) -> String {
+        // Date-only: exactly 10 chars matching YYYY-MM-DD pattern
+        if s.len() == 10 && s.as_bytes().get(4) == Some(&b'-') && s.as_bytes().get(7) == Some(&b'-')
+        {
+            format!("{s}T00:00:00Z")
+        } else {
+            s.to_string()
+        }
+    }
+
     /// Extract a non-empty string from a JSON pointer path
     fn extract_non_empty_string(json: &JsonValue, path: &str) -> Option<String> {
         json.pointer(path)
@@ -509,25 +642,79 @@ impl OpenApiFdw {
             .map(ToString::to_string)
     }
 
-    /// Convert a JSON value to a Cell based on the target column type
-    fn json_to_cell(
+    /// Build a map from column index to resolved JSON key, using the first row's keys.
+    ///
+    /// This runs the 3-step matching (exact → camelCase → case-insensitive) once per
+    /// column instead of once per column per row. Called after each `make_request`.
+    fn build_column_key_map(&mut self) {
+        if self.cached_columns.is_empty() || self.src_rows.is_empty() {
+            self.column_key_map = vec![None; self.cached_columns.len()];
+            return;
+        }
+
+        let first_row = &self.src_rows[0];
+        let effective_row = self.object_path.as_ref().map_or(first_row, |path| {
+            first_row.pointer(path).unwrap_or(first_row)
+        });
+
+        self.column_key_map = if let Some(obj) = effective_row.as_object() {
+            self.cached_columns
+                .iter()
+                .map(|cc| {
+                    // attrs is special-cased (returns entire row), no key lookup needed
+                    if cc.name == "attrs" {
+                        return None;
+                    }
+                    if obj.contains_key(&cc.name) {
+                        Some(KeyMatch::Exact)
+                    } else if obj.contains_key(&cc.camel_name) {
+                        Some(KeyMatch::CamelCase)
+                    } else if let Some(key) = obj.keys().find(|k| k.to_lowercase() == cc.lower_name)
+                    {
+                        Some(KeyMatch::CaseInsensitive(key.clone()))
+                    } else {
+                        // Normalized match: strip non-alphanumeric chars and compare.
+                        // Handles JSON-LD @-prefixed keys (@id↔_id), dotted names
+                        // (user.name↔user_name), and other special-char properties.
+                        obj.keys()
+                            .find(|k| {
+                                let key_alnum: String = k
+                                    .chars()
+                                    .filter(|c| c.is_alphanumeric())
+                                    .collect::<String>()
+                                    .to_lowercase();
+                                key_alnum == cc.alnum_name
+                            })
+                            .cloned()
+                            .map(KeyMatch::CaseInsensitive)
+                    }
+                })
+                .collect()
+        } else {
+            vec![None; self.cached_columns.len()]
+        };
+    }
+
+    /// Convert a JSON value to a Cell using cached column metadata and pre-resolved key map.
+    ///
+    /// Uses `CachedColumn` fields instead of WASM resource methods, and the pre-built
+    /// `column_key_map` for O(1) JSON key lookup instead of per-row 3-step matching.
+    fn json_to_cell_cached(
         &self,
         src_row: &JsonValue,
-        tgt_col: &Column,
+        col_idx: usize,
     ) -> Result<Option<Cell>, FdwError> {
-        let tgt_col_name = tgt_col.name();
+        let cc = &self.cached_columns[col_idx];
 
         // Special handling for 'attrs' column - returns entire row as JSON
-        if tgt_col_name == "attrs" {
+        if cc.name == "attrs" {
             return Ok(Some(Cell::Json(src_row.to_string())));
         }
 
         // If this column was used as a query/path parameter, inject the WHERE clause
-        // value directly. This ensures PostgreSQL's post-filter passes even when the
-        // API returns a different case (e.g. API accepts "actual" but returns "Actual").
-        // Coerce the string value to the target column type to avoid type mismatches.
-        if let Some(value) = self.path_params.get(&tgt_col_name.to_lowercase()) {
-            let cell = match tgt_col.type_oid() {
+        // value directly. Coerce to target column type to avoid type mismatches.
+        if let Some(value) = self.path_params.get(&cc.lower_name) {
+            let cell = match &cc.type_oid {
                 TypeOid::Bool => value.parse::<bool>().ok().map(Cell::Bool),
                 TypeOid::I8 => value.parse::<i8>().ok().map(Cell::I8),
                 TypeOid::I16 => value.parse::<i16>().ok().map(Cell::I16),
@@ -537,34 +724,51 @@ impl OpenApiFdw {
                 TypeOid::F32 => value.parse::<f64>().ok().map(|v| Cell::F32(v as f32)),
                 TypeOid::F64 => value.parse::<f64>().ok().map(Cell::F64),
                 TypeOid::Numeric => value.parse::<f64>().ok().map(Cell::Numeric),
-                TypeOid::Date => time::parse_from_rfc3339(value)
+                TypeOid::Date => time::parse_from_rfc3339(&Self::normalize_datetime(value))
                     .ok()
                     .map(|ts| Cell::Date(ts / 1_000_000)),
-                TypeOid::Timestamp => time::parse_from_rfc3339(value).ok().map(Cell::Timestamp),
-                TypeOid::Timestamptz => time::parse_from_rfc3339(value).ok().map(Cell::Timestamptz),
+                TypeOid::Timestamp => time::parse_from_rfc3339(&Self::normalize_datetime(value))
+                    .ok()
+                    .map(Cell::Timestamp),
+                TypeOid::Timestamptz => time::parse_from_rfc3339(&Self::normalize_datetime(value))
+                    .ok()
+                    .map(Cell::Timestamptz),
                 TypeOid::Json => Some(Cell::Json(value.clone())),
                 _ => Some(Cell::String(value.clone())),
             };
             return Ok(cell.or_else(|| Some(Cell::String(value.clone()))));
         }
 
-        // Handle column name matching with multiple strategies:
-        // 1. Exact match
-        // 2. snake_case to camelCase conversion
-        // 3. Case-insensitive match (PostgreSQL lowercases column names)
+        // Use pre-resolved key from column_key_map for O(1) lookup
         let src = src_row.as_object().and_then(|obj| {
-            obj.get(&tgt_col_name)
-                .or_else(|| {
-                    // Try camelCase version (snake_case to camelCase)
-                    let camel = to_camel_case(&tgt_col_name);
-                    obj.get(&camel)
-                })
-                .or_else(|| {
-                    // Case-insensitive match for when PostgreSQL lowercases column names
-                    obj.iter()
-                        .find(|(k, _)| k.to_lowercase() == tgt_col_name.to_lowercase())
-                        .map(|(_, v)| v)
-                })
+            match self.column_key_map.get(col_idx) {
+                Some(Some(KeyMatch::Exact)) => obj.get(&cc.name),
+                Some(Some(KeyMatch::CamelCase)) => obj.get(&cc.camel_name),
+                Some(Some(KeyMatch::CaseInsensitive(key))) => obj.get(key),
+                _ => {
+                    // Fallback: 4-step matching for heterogeneous row shapes
+                    obj.get(&cc.name)
+                        .or_else(|| obj.get(&cc.camel_name))
+                        .or_else(|| {
+                            obj.iter()
+                                .find(|(k, _)| k.to_lowercase() == cc.lower_name)
+                                .map(|(_, v)| v)
+                        })
+                        .or_else(|| {
+                            // Normalized: strip non-alnum, compare (handles @-keys, dots, etc.)
+                            obj.iter()
+                                .find(|(k, _)| {
+                                    let key_alnum: String = k
+                                        .chars()
+                                        .filter(|c| c.is_alphanumeric())
+                                        .collect::<String>()
+                                        .to_lowercase();
+                                    key_alnum == cc.alnum_name
+                                })
+                                .map(|(_, v)| v)
+                        })
+                }
+            }
         });
 
         let src = match src {
@@ -573,7 +777,7 @@ impl OpenApiFdw {
         };
 
         // Type conversion based on target column type
-        let cell = match tgt_col.type_oid() {
+        let cell = match &cc.type_oid {
             TypeOid::Bool => src.as_bool().map(Cell::Bool),
             TypeOid::I8 => src
                 .as_i64()
@@ -592,35 +796,36 @@ impl OpenApiFdw {
             TypeOid::F32 => src.as_f64().map(|v| Cell::F32(v as f32)),
             TypeOid::F64 => src.as_f64().map(Cell::F64),
             TypeOid::Numeric => src.as_f64().map(Cell::Numeric),
-            TypeOid::String => {
-                // Handle both string and non-string JSON values
-                Some(Cell::String(
-                    src.as_str()
-                        .map_or_else(|| src.to_string(), ToOwned::to_owned),
-                ))
-            }
+            TypeOid::String => Some(Cell::String(
+                src.as_str()
+                    .map_or_else(|| src.to_string(), ToOwned::to_owned),
+            )),
             TypeOid::Date => {
                 if let Some(s) = src.as_str() {
-                    let ts = time::parse_from_rfc3339(s)?;
+                    let ts = time::parse_from_rfc3339(&Self::normalize_datetime(s))?;
                     Some(Cell::Date(ts / 1_000_000))
                 } else {
-                    None
+                    // Unix timestamp (seconds since epoch)
+                    src.as_i64().map(Cell::Date)
                 }
             }
             TypeOid::Timestamp => {
                 if let Some(s) = src.as_str() {
-                    let ts = time::parse_from_rfc3339(s)?;
+                    let ts = time::parse_from_rfc3339(&Self::normalize_datetime(s))?;
                     Some(Cell::Timestamp(ts))
                 } else {
-                    None
+                    // Unix timestamp (seconds since epoch) → microseconds
+                    src.as_i64().map(|epoch| Cell::Timestamp(epoch * 1_000_000))
                 }
             }
             TypeOid::Timestamptz => {
                 if let Some(s) = src.as_str() {
-                    let ts = time::parse_from_rfc3339(s)?;
+                    let ts = time::parse_from_rfc3339(&Self::normalize_datetime(s))?;
                     Some(Cell::Timestamptz(ts))
                 } else {
-                    None
+                    // Unix timestamp (seconds since epoch) → microseconds
+                    src.as_i64()
+                        .map(|epoch| Cell::Timestamptz(epoch * 1_000_000))
                 }
             }
             TypeOid::Uuid => src.as_str().map(|v| Cell::String(v.to_owned())),
@@ -749,17 +954,31 @@ impl Guest for OpenApiFdw {
         }
 
         if let Some(key) = api_key {
-            let header_name = opts.require_or("api_key_header", "Authorization");
-            let prefix = opts.get("api_key_prefix");
+            let location = opts.require_or("api_key_location", "header");
 
-            let header_value = match (header_name.as_str(), prefix) {
-                ("Authorization", None) => format!("Bearer {key}"),
-                (_, Some(p)) => format!("{p} {key}"),
-                (_, None) => key,
-            };
+            if location == "query" {
+                // API key sent as query parameter (e.g., ?api_key=xxx)
+                let param_name = opts.require_or("api_key_header", "api_key");
+                this.api_key_query = Some((param_name, key));
+            } else if location == "cookie" {
+                // API key sent as cookie (e.g., Cookie: session=xxx)
+                let cookie_name = opts.require_or("api_key_header", "api_key");
+                this.headers
+                    .push(("cookie".to_owned(), format!("{cookie_name}={key}")));
+            } else {
+                // API key sent as header (default)
+                let header_name = opts.require_or("api_key_header", "Authorization");
+                let prefix = opts.get("api_key_prefix");
 
-            this.headers
-                .push((header_name.to_lowercase(), header_value));
+                let header_value = match (header_name.as_str(), prefix) {
+                    ("Authorization", None) => format!("Bearer {key}"),
+                    (_, Some(p)) => format!("{p} {key}"),
+                    (_, None) => key,
+                };
+
+                this.headers
+                    .push((header_name.to_lowercase(), header_value));
+            }
         }
 
         if let Some(token) = bearer_token {
@@ -778,6 +997,11 @@ impl Guest for OpenApiFdw {
         this.page_size_param = opts.require_or("page_size_param", "limit");
         this.cursor_param = opts.require_or("cursor_param", "after");
 
+        // Debug timing: emit per-scan timing via NOTICE when enabled
+        this.debug_timing = opts
+            .get("debug_timing")
+            .is_some_and(|v| v == "true" || v == "1");
+
         stats::inc_stats(FDW_NAME, stats::Metric::CreateTimes, 1);
 
         Ok(())
@@ -790,6 +1014,15 @@ impl Guest for OpenApiFdw {
         // Get table options
         this.endpoint = opts.require("endpoint")?;
         this.rowid_col = opts.require_or("rowid_column", "id");
+
+        // HTTP method (default GET)
+        this.method = match opts.get("method").as_deref() {
+            Some("POST") | Some("post") => http::Method::Post,
+            _ => http::Method::Get,
+        };
+
+        // Request body for POST endpoints
+        this.request_body = opts.get("request_body").unwrap_or_default();
         this.response_path = opts.get("response_path");
         this.object_path = opts.get("object_path"); // e.g., "/properties" for GeoJSON
         this.cursor_path = opts.require_or("cursor_path", "");
@@ -811,14 +1044,42 @@ impl Guest for OpenApiFdw {
             }
         }
 
-        // Reset pagination state
+        // Reset pagination and path param state
         this.next_cursor = None;
         this.next_url = None;
+        this.path_params.clear();
 
         // Capture limit for early pagination stop
         // Note: Postgres handles offset locally, so we need offset + count total rows
         this.src_limit = ctx.get_limit().map(|v| v.offset() + v.count());
         this.consumed_row_cnt = 0;
+
+        // Cache column metadata once to avoid WASM boundary crossings in iter_scan
+        this.cached_columns = ctx
+            .get_columns()
+            .iter()
+            .map(|col| {
+                let name = col.name();
+                let camel_name = to_camel_case(&name);
+                let lower_name = name.to_lowercase();
+                let alnum_name = name
+                    .chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .collect::<String>()
+                    .to_lowercase();
+                CachedColumn {
+                    type_oid: col.type_oid(),
+                    name,
+                    camel_name,
+                    lower_name,
+                    alnum_name,
+                }
+            })
+            .collect();
+
+        if this.debug_timing {
+            this.scan_row_count = 0;
+        }
 
         // Make initial request
         this.make_request(ctx)?;
@@ -861,13 +1122,16 @@ impl Guest for OpenApiFdw {
             .object_path
             .as_ref()
             .map_or(src_row, |path| src_row.pointer(path).unwrap_or(src_row));
-        for tgt_col in ctx.get_columns() {
-            let cell = this.json_to_cell(effective_row, &tgt_col)?;
+        for (col_idx, _) in this.cached_columns.iter().enumerate() {
+            let cell = this.json_to_cell_cached(effective_row, col_idx)?;
             row.push(cell.as_ref());
         }
 
         this.src_idx += 1;
         this.consumed_row_cnt += 1;
+        if this.debug_timing {
+            this.scan_row_count += 1;
+        }
 
         Ok(Some(0))
     }
@@ -882,8 +1146,19 @@ impl Guest for OpenApiFdw {
 
     fn end_scan(_ctx: &Context) -> FdwResult {
         let this = Self::this_mut();
+
+        if this.debug_timing {
+            utils::report_info(&format!(
+                "[openapi_fdw] Scan complete: {} rows, {} columns",
+                this.scan_row_count,
+                this.cached_columns.len()
+            ));
+        }
+
         this.src_rows.clear();
         this.src_idx = 0;
+        this.cached_columns.clear();
+        this.column_key_map.clear();
         Ok(())
     }
 
@@ -940,172 +1215,5 @@ impl Guest for OpenApiFdw {
 bindings::export!(OpenApiFdw with_types_in bindings);
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    // --- json_to_rows tests ---
-
-    #[test]
-    fn test_json_to_rows_array() {
-        let data = serde_json::json!([
-            {"id": 1, "name": "alice"},
-            {"id": 2, "name": "bob"},
-            {"id": 3, "name": "charlie"}
-        ]);
-        let rows = OpenApiFdw::json_to_rows(data).unwrap();
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0]["id"], 1);
-        assert_eq!(rows[2]["name"], "charlie");
-    }
-
-    #[test]
-    fn test_json_to_rows_single_object() {
-        let data = serde_json::json!({"id": 1, "name": "alice"});
-        let rows = OpenApiFdw::json_to_rows(data).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["name"], "alice");
-    }
-
-    #[test]
-    fn test_json_to_rows_empty_array() {
-        let data = serde_json::json!([]);
-        let rows = OpenApiFdw::json_to_rows(data).unwrap();
-        assert!(rows.is_empty());
-    }
-
-    #[test]
-    fn test_json_to_rows_rejects_primitive() {
-        let data = serde_json::json!("just a string");
-        assert!(OpenApiFdw::json_to_rows(data).is_err());
-    }
-
-    // --- extract_data tests ---
-
-    fn fdw_with_response_path(path: Option<&str>) -> OpenApiFdw {
-        OpenApiFdw {
-            response_path: path.map(String::from),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn test_extract_data_with_response_path() {
-        let fdw = fdw_with_response_path(Some("/features"));
-        let mut resp = serde_json::json!({
-            "type": "FeatureCollection",
-            "features": [
-                {"properties": {"id": "a"}},
-                {"properties": {"id": "b"}}
-            ]
-        });
-        let rows = fdw.extract_data(&mut resp).unwrap();
-        assert_eq!(rows.len(), 2);
-        // Original is taken, not cloned
-        assert!(resp["features"].is_null());
-    }
-
-    #[test]
-    fn test_extract_data_with_nested_response_path() {
-        let fdw = fdw_with_response_path(Some("/result/data"));
-        let mut resp = serde_json::json!({
-            "result": {
-                "data": [{"id": 1}, {"id": 2}, {"id": 3}]
-            }
-        });
-        let rows = fdw.extract_data(&mut resp).unwrap();
-        assert_eq!(rows.len(), 3);
-    }
-
-    #[test]
-    fn test_extract_data_invalid_response_path() {
-        let fdw = fdw_with_response_path(Some("/nonexistent"));
-        let mut resp = serde_json::json!({"data": [1, 2, 3]});
-        assert!(fdw.extract_data(&mut resp).is_err());
-    }
-
-    #[test]
-    fn test_extract_data_direct_array() {
-        let fdw = fdw_with_response_path(None);
-        let mut resp = serde_json::json!([{"id": 1}, {"id": 2}]);
-        let rows = fdw.extract_data(&mut resp).unwrap();
-        assert_eq!(rows.len(), 2);
-    }
-
-    #[test]
-    fn test_extract_data_auto_detect_data_key() {
-        let fdw = fdw_with_response_path(None);
-        let mut resp = serde_json::json!({
-            "data": [{"id": 1}, {"id": 2}],
-            "meta": {"total": 2}
-        });
-        let rows = fdw.extract_data(&mut resp).unwrap();
-        assert_eq!(rows.len(), 2);
-        assert!(resp["data"].is_null());
-    }
-
-    #[test]
-    fn test_extract_data_auto_detect_results_key() {
-        let fdw = fdw_with_response_path(None);
-        let mut resp = serde_json::json!({
-            "results": [{"id": "x"}],
-            "count": 1
-        });
-        let rows = fdw.extract_data(&mut resp).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["id"], "x");
-    }
-
-    #[test]
-    fn test_extract_data_auto_detect_features_key() {
-        let fdw = fdw_with_response_path(None);
-        let mut resp = serde_json::json!({
-            "type": "FeatureCollection",
-            "features": [
-                {"type": "Feature", "properties": {"name": "A"}},
-                {"type": "Feature", "properties": {"name": "B"}}
-            ]
-        });
-        let rows = fdw.extract_data(&mut resp).unwrap();
-        assert_eq!(rows.len(), 2);
-    }
-
-    #[test]
-    fn test_extract_data_single_object_fallback() {
-        let fdw = fdw_with_response_path(None);
-        let mut resp = serde_json::json!({
-            "id": "abc",
-            "name": "singleton"
-        });
-        let rows = fdw.extract_data(&mut resp).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["id"], "abc");
-    }
-
-    #[test]
-    fn test_extract_data_ownership_no_clone() {
-        // Verify that extract_data takes ownership rather than cloning:
-        // after extraction, the original data should be replaced with null
-        let fdw = fdw_with_response_path(Some("/items"));
-        let mut resp = serde_json::json!({
-            "items": [
-                {"id": 1, "payload": "x".repeat(1000)},
-                {"id": 2, "payload": "y".repeat(1000)}
-            ]
-        });
-        let rows = fdw.extract_data(&mut resp).unwrap();
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0]["payload"].as_str().unwrap().len(), 1000);
-        // The original value was taken, not cloned
-        assert!(resp.pointer("/items").unwrap().is_null());
-    }
-
-    // --- to_camel_case tests ---
-
-    #[test]
-    fn test_to_camel_case() {
-        assert_eq!(to_camel_case("snake_case"), "snakeCase");
-        assert_eq!(to_camel_case("already"), "already");
-        assert_eq!(to_camel_case("multi_word_name"), "multiWordName");
-        assert_eq!(to_camel_case(""), "");
-    }
-}
+#[path = "lib_tests.rs"]
+mod tests;

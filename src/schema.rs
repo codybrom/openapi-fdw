@@ -3,6 +3,8 @@
 //! This module handles mapping `OpenAPI` types to `PostgreSQL` types
 //! and generating CREATE FOREIGN TABLE statements.
 
+use std::collections::HashMap;
+
 use crate::spec::{EndpointInfo, OpenApiSpec, Schema};
 
 /// Maps `OpenAPI` schema types to `PostgreSQL` type names
@@ -18,11 +20,15 @@ pub fn openapi_to_pg_type(schema: &Schema, spec: &OpenApiSpec) -> &'static str {
         Some("string") => match resolved.format.as_deref() {
             Some("date") => "date",
             Some("date-time") => "timestamptz",
-            // All other string formats map to text
+            Some("time") => "time",
+            Some("byte") | Some("binary") => "bytea",
+            Some("uuid") => "uuid",
             _ => "text",
         },
         Some("integer") => match resolved.format.as_deref() {
             Some("int32") => "integer",
+            // Stripe uses format: "unix-time" for epoch seconds
+            Some("unix-time") => "timestamptz",
             // int64 and others default to bigint for safety
             _ => "bigint",
         },
@@ -62,12 +68,27 @@ pub fn extract_columns(schema: &Schema, spec: &OpenApiSpec, include_attrs: bool)
     if let Some(schema) = item_schema {
         // Check if this is an object with properties
         if !schema.properties.is_empty() {
+            // Track seen names to detect collisions after sanitization
+            let mut seen: HashMap<String, usize> = HashMap::new();
+
             for (name, prop_schema) in &schema.properties {
+                // Skip writeOnly properties (e.g., "password") — not returned in GET responses
+                if prop_schema.write_only {
+                    continue;
+                }
                 let pg_type = openapi_to_pg_type(prop_schema, spec);
                 let nullable = !schema.required.contains(name) || prop_schema.nullable;
+                let mut col_name = sanitize_column_name(name);
+
+                // Deduplicate: if this sanitized name was already used, append a suffix
+                let count = seen.entry(col_name.clone()).or_insert(0);
+                if *count > 0 {
+                    col_name = format!("{col_name}_{count}");
+                }
+                *seen.get_mut(&sanitize_column_name(name)).unwrap() += 1;
 
                 columns.push(ColumnDef {
-                    name: sanitize_column_name(name),
+                    name: col_name,
                     pg_type,
                     nullable,
                 });
@@ -95,12 +116,29 @@ pub fn extract_columns(schema: &Schema, spec: &OpenApiSpec, include_attrs: bool)
 }
 
 /// Sanitize a column name for `PostgreSQL` (converts `camelCase` to `snake_case`)
+///
+/// Handles consecutive uppercase (acronyms) correctly:
+/// - `clusterIP` → `cluster_ip` (not `cluster_i_p`)
+/// - `HTMLParser` → `html_parser` (not `h_t_m_l_parser`)
+/// - `getHTTPSUrl` → `get_https_url`
 fn sanitize_column_name(name: &str) -> String {
     let mut result = String::new();
+    let chars: Vec<char> = name.chars().collect();
 
-    for (i, c) in name.chars().enumerate() {
+    for (i, &c) in chars.iter().enumerate() {
         if c.is_uppercase() && i > 0 {
-            result.push('_');
+            let prev = chars[i - 1];
+            let next_is_lower = chars.get(i + 1).is_some_and(|n| n.is_lowercase());
+
+            // Insert '_' before an uppercase letter when:
+            // 1. Previous char is lowercase/digit (start of new word: "cluster|I|P")
+            // 2. Previous char is uppercase but next is lowercase (end of acronym: "HTM|L|Parser")
+            if prev.is_lowercase()
+                || prev.is_ascii_digit()
+                || (prev.is_uppercase() && next_is_lower)
+            {
+                result.push('_');
+            }
             result.push(c.to_ascii_lowercase());
         } else if c.is_alphanumeric() || c == '_' {
             result.push(c.to_ascii_lowercase());
@@ -182,12 +220,18 @@ pub fn generate_foreign_table(
     // Escape single quotes in option values for SQL
     let escaped_endpoint = endpoint.path.replace('\'', "''");
 
-    let options = if let Some(rowid) = rowid_col {
+    let mut option_parts = vec![format!("    endpoint '{escaped_endpoint}'")];
+
+    if endpoint.method != "GET" {
+        option_parts.push(format!("    method '{}'", endpoint.method));
+    }
+
+    if let Some(rowid) = rowid_col {
         let escaped_rowid = rowid.replace('\'', "''");
-        format!("    endpoint '{escaped_endpoint}',\n    rowid_column '{escaped_rowid}'")
-    } else {
-        format!("    endpoint '{escaped_endpoint}'")
-    };
+        option_parts.push(format!("    rowid_column '{escaped_rowid}'"));
+    }
+
+    let options = option_parts.join(",\n");
 
     format!(
         r"CREATE FOREIGN TABLE IF NOT EXISTS {} (
@@ -228,46 +272,5 @@ pub fn generate_all_tables(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_sanitize_column_name() {
-        assert_eq!(sanitize_column_name("userName"), "user_name");
-        assert_eq!(sanitize_column_name("user-name"), "user_name");
-        assert_eq!(sanitize_column_name("123abc"), "_123abc");
-        assert_eq!(sanitize_column_name("already_snake"), "already_snake");
-    }
-
-    #[test]
-    fn test_openapi_to_pg_type() {
-        let spec = OpenApiSpec::from_str(
-            r#"{
-            "openapi": "3.0.0",
-            "info": {"title": "Test"},
-            "paths": {}
-        }"#,
-        )
-        .unwrap();
-
-        let string_schema = Schema {
-            schema_type: Some("string".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(openapi_to_pg_type(&string_schema, &spec), "text");
-
-        let date_schema = Schema {
-            schema_type: Some("string".to_string()),
-            format: Some("date-time".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(openapi_to_pg_type(&date_schema, &spec), "timestamptz");
-
-        let int_schema = Schema {
-            schema_type: Some("integer".to_string()),
-            format: Some("int32".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(openapi_to_pg_type(&int_schema, &spec), "integer");
-    }
-}
+#[path = "schema_tests.rs"]
+mod tests;

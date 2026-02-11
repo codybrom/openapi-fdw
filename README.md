@@ -28,10 +28,10 @@ create foreign data wrapper wasm_wrapper
 create server my_api_server
   foreign data wrapper wasm_wrapper
   options (
-    fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.1.4/openapi_fdw.wasm',
+    fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.2.0/openapi_fdw.wasm',
     fdw_package_name 'supabase:openapi-fdw',
-    fdw_package_version '0.1.4',
-    fdw_package_checksum '4da6825be678a990623e213f205ef50d57517ab51aa12023b2fb54dd4e604ee0',
+    fdw_package_version '0.2.0',
+    fdw_package_checksum '<sha256-checksum>',
     base_url 'https://api.example.com',
     spec_url 'https://api.example.com/openapi.json'
   );
@@ -57,10 +57,10 @@ select * from users limit 10;
 create server weather_api
   foreign data wrapper wasm_wrapper
   options (
-    fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.1.4/openapi_fdw.wasm',
+    fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.2.0/openapi_fdw.wasm',
     fdw_package_name 'supabase:openapi-fdw',
-    fdw_package_version '0.1.4',
-    fdw_package_checksum '4da6825be678a990623e213f205ef50d57517ab51aa12023b2fb54dd4e604ee0',
+    fdw_package_version '0.2.0',
+    fdw_package_checksum '<sha256-checksum>',
     base_url 'https://api.weather.gov',
     spec_url 'https://api.weather.gov/openapi.json',
     user_agent 'openapi-fdw'
@@ -86,10 +86,10 @@ Then reference the Vault secret ID:
 create server my_api
   foreign data wrapper wasm_wrapper
   options (
-    fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.1.4/openapi_fdw.wasm',
+    fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.2.0/openapi_fdw.wasm',
     fdw_package_name 'supabase:openapi-fdw',
-    fdw_package_version '0.1.4',
-    fdw_package_checksum '4da6825be678a990623e213f205ef50d57517ab51aa12023b2fb54dd4e604ee0',
+    fdw_package_version '0.2.0',
+    fdw_package_checksum '<sha256-checksum>',
     base_url 'https://api.example.com/v1',
     spec_url 'https://api.example.com/openapi.json',
     api_key_id '<vault_secret_id>'
@@ -238,6 +238,7 @@ cargo test
 
 | Version | Date       | Notes                                                       |
 | ------- | ---------- | ----------------------------------------------------------- |
+| 0.2.0   | 2026-02-10 | POST-for-read, OpenAPI 3.1 type arrays, new PG types, cached columns, integration tests |
 | 0.1.4   | 2026-02-09 | Type coercion, auth validation, table naming, URL fixes, include_attrs option |
 | 0.1.3   | 2026-02-07 | Perf: avoid cloning JSON response data during row extraction |
 | 0.1.2   | 2026-02-06 | Fix: prefer WHERE clause value for query/path param columns |
