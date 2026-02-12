@@ -1157,3 +1157,615 @@ fn test_meta_pagination_has_more_nested() {
     assert_eq!(fdw.next_cursor, Some("cursor_abc123".to_string()));
     assert_eq!(fdw.next_url, None);
 }
+
+// --- OpenAPI 3.1 READ operation coverage: real-world API response patterns ---
+
+// == normalize_datetime edge cases ==
+
+#[test]
+fn test_normalize_datetime_with_milliseconds() {
+    // ISO 8601 datetime with milliseconds — should pass through
+    let dt = "2024-06-15T10:30:00.123Z";
+    assert_eq!(OpenApiFdw::normalize_datetime(dt), dt);
+}
+
+#[test]
+fn test_normalize_datetime_short_string() {
+    // String shorter than 10 chars — should not be treated as date
+    assert_eq!(OpenApiFdw::normalize_datetime("2024-01"), "2024-01");
+}
+
+#[test]
+fn test_normalize_datetime_long_non_date() {
+    // Exactly 10 chars but not a date pattern (no dashes at right positions)
+    assert_eq!(OpenApiFdw::normalize_datetime("1234567890"), "1234567890");
+}
+
+#[test]
+fn test_normalize_datetime_empty_string() {
+    assert_eq!(OpenApiFdw::normalize_datetime(""), "");
+}
+
+// == json_to_cell edge cases for type coercion ==
+
+#[test]
+fn test_json_to_cell_string_from_object() {
+    // When a column expects text but JSON value is an object, serialize it
+    let obj = serde_json::json!({"info": {"nested": true, "value": 42}});
+    let cell = cell_from_json("info", TypeOid::String, &obj).unwrap();
+    let s = cell_to_string(cell.as_ref().unwrap()).unwrap();
+    assert!(s.contains("\"nested\":true"));
+    assert!(s.contains("\"value\":42"));
+}
+
+#[test]
+fn test_json_to_cell_string_from_array() {
+    // When a column expects text but JSON value is an array, serialize it
+    let obj = serde_json::json!({"tags": ["rust", "wasm", "sql"]});
+    let cell = cell_from_json("tags", TypeOid::String, &obj).unwrap();
+    let s = cell_to_string(cell.as_ref().unwrap()).unwrap();
+    assert_eq!(s, r#"["rust","wasm","sql"]"#);
+}
+
+#[test]
+fn test_json_to_cell_i32_from_float_truncates() {
+    // JSON number 42.9 → i64 returns 42 (as_i64 truncates), then try_from
+    // serde_json::as_i64() returns None for floats, so this should be None
+    let obj = serde_json::json!({"val": 42.9});
+    let cell = cell_from_json("val", TypeOid::I32, &obj).unwrap();
+    assert!(cell.is_none(), "Float value should not coerce to I32");
+}
+
+#[test]
+fn test_json_to_cell_i64_max() {
+    // Maximum i64 value
+    let obj = serde_json::json!({"val": i64::MAX});
+    let cell = cell_from_json("val", TypeOid::I64, &obj).unwrap();
+    assert!(matches!(cell, Some(Cell::I64(v)) if v == i64::MAX));
+}
+
+#[test]
+fn test_json_to_cell_f64_nan_like() {
+    // JSON doesn't have NaN — should always be a valid number
+    let obj = serde_json::json!({"val": 1e308});
+    let cell = cell_from_json("val", TypeOid::F64, &obj).unwrap();
+    assert!(matches!(cell, Some(Cell::F64(_))));
+}
+
+#[test]
+fn test_json_to_cell_bool_from_non_bool() {
+    // Non-boolean value for boolean column → None
+    let obj = serde_json::json!({"active": "yes"});
+    let cell = cell_from_json("active", TypeOid::Bool, &obj).unwrap();
+    assert!(cell.is_none(), "String 'yes' should not coerce to Bool");
+}
+
+#[test]
+fn test_json_to_cell_numeric_from_string() {
+    // Numeric column with string value → None (as_f64 returns None for strings)
+    let obj = serde_json::json!({"price": "29.99"});
+    let cell = cell_from_json("price", TypeOid::Numeric, &obj).unwrap();
+    assert!(cell.is_none(), "String number should not coerce to Numeric");
+}
+
+#[test]
+fn test_json_to_cell_json_from_null() {
+    // Null value for JSON column → None (null is filtered before type matching)
+    let obj = serde_json::json!({"meta": null});
+    let cell = cell_from_json("meta", TypeOid::Json, &obj).unwrap();
+    assert!(cell.is_none());
+}
+
+#[test]
+fn test_json_to_cell_json_from_primitive() {
+    // Primitive value serialized as JSON
+    let obj = serde_json::json!({"val": 42});
+    let cell = cell_from_json("val", TypeOid::Json, &obj).unwrap();
+    if let Some(Cell::Json(s)) = cell {
+        assert_eq!(s, "42");
+    } else {
+        panic!("Expected Json cell");
+    }
+}
+
+#[test]
+fn test_json_to_cell_uuid_from_non_string() {
+    // UUID column with numeric value → None (as_str returns None)
+    let obj = serde_json::json!({"uid": 12345});
+    let cell = cell_from_json("uid", TypeOid::Uuid, &obj).unwrap();
+    assert!(cell.is_none());
+}
+
+// == extract_data edge cases ==
+
+#[test]
+fn test_extract_data_response_path_to_single_object() {
+    // response_path pointing to a single object (not array) → wrapped as single row
+    let fdw = fdw_with_response_path(Some("/user"));
+    let mut resp = serde_json::json!({
+        "user": {"id": 1, "name": "alice"},
+        "meta": {"request_id": "abc"}
+    });
+    let rows = fdw.extract_data(&mut resp).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], 1);
+    assert_eq!(rows[0]["name"], "alice");
+}
+
+#[test]
+fn test_extract_data_deeply_nested_response_path() {
+    // Three-level deep response path
+    let fdw = fdw_with_response_path(Some("/response/body/items"));
+    let mut resp = serde_json::json!({
+        "response": {
+            "body": {
+                "items": [{"id": 1}, {"id": 2}]
+            }
+        }
+    });
+    let rows = fdw.extract_data(&mut resp).unwrap();
+    assert_eq!(rows.len(), 2);
+}
+
+#[test]
+fn test_extract_data_empty_object_is_single_row() {
+    // Empty object {} treated as single row
+    let fdw = fdw_with_response_path(None);
+    let mut resp = serde_json::json!({});
+    let rows = fdw.extract_data(&mut resp).unwrap();
+    assert_eq!(rows.len(), 1);
+}
+
+// == Pagination edge cases ==
+
+#[test]
+fn test_handle_pagination_has_more_true_but_no_cursor() {
+    // has_more: true but no cursor path found — should NOT paginate (avoid infinite loop)
+    let mut fdw = make_fdw_for_pagination("");
+    let resp = serde_json::json!({
+        "has_more": true,
+        "data": [{"id": 1}]
+    });
+    fdw.handle_pagination(&resp);
+    assert_eq!(fdw.next_cursor, None);
+    assert_eq!(fdw.next_url, None);
+}
+
+#[test]
+fn test_handle_pagination_next_url_direct_key() {
+    // Auto-detect: /next_url key directly
+    let mut fdw = make_fdw_for_pagination("");
+    let resp = serde_json::json!({
+        "next_url": "https://api.example.com/items?page=3",
+        "data": [{"id": 1}]
+    });
+    fdw.handle_pagination(&resp);
+    assert_eq!(
+        fdw.next_url,
+        Some("https://api.example.com/items?page=3".to_string())
+    );
+}
+
+#[test]
+fn test_handle_pagination_pagination_next_url() {
+    // Auto-detect: /pagination/next_url key
+    let mut fdw = make_fdw_for_pagination("");
+    let resp = serde_json::json!({
+        "pagination": {
+            "next_url": "https://api.example.com/page/2"
+        },
+        "data": []
+    });
+    fdw.handle_pagination(&resp);
+    assert_eq!(
+        fdw.next_url,
+        Some("https://api.example.com/page/2".to_string())
+    );
+}
+
+#[test]
+fn test_handle_pagination_next_direct() {
+    // Auto-detect: /next key directly (not nested)
+    let mut fdw = make_fdw_for_pagination("");
+    let resp = serde_json::json!({
+        "next": "https://api.example.com/items?cursor=xyz",
+        "data": [{"id": 1}]
+    });
+    fdw.handle_pagination(&resp);
+    assert_eq!(
+        fdw.next_url,
+        Some("https://api.example.com/items?cursor=xyz".to_string())
+    );
+}
+
+#[test]
+fn test_handle_pagination_cursor_path_integer_value() {
+    // Cursor path resolves to an integer — should be treated as non-string, ignored
+    let mut fdw = make_fdw_for_pagination("/cursor");
+    let resp = serde_json::json!({"cursor": 12345, "data": []});
+    fdw.handle_pagination(&resp);
+    // extract_non_empty_string returns None for non-string values
+    assert_eq!(fdw.next_cursor, None);
+    assert_eq!(fdw.next_url, None);
+}
+
+#[test]
+fn test_handle_pagination_pagination_has_more_with_cursor() {
+    // Auto-detect: /pagination/has_more + /pagination/next_cursor
+    let mut fdw = make_fdw_for_pagination("");
+    let resp = serde_json::json!({
+        "pagination": {
+            "has_more": true,
+            "next_cursor": "pg_cursor_99"
+        },
+        "data": [{"id": 1}]
+    });
+    fdw.handle_pagination(&resp);
+    assert_eq!(fdw.next_cursor, Some("pg_cursor_99".to_string()));
+}
+
+#[test]
+fn test_handle_pagination_meta_next_url() {
+    // Auto-detect: /meta/pagination/next_url (not /next)
+    let mut fdw = make_fdw_for_pagination("");
+    let resp = serde_json::json!({
+        "meta": {
+            "pagination": {
+                "next_url": "https://api.example.com/page/4"
+            }
+        },
+        "data": []
+    });
+    fdw.handle_pagination(&resp);
+    assert_eq!(
+        fdw.next_url,
+        Some("https://api.example.com/page/4".to_string())
+    );
+}
+
+// == Real-world API response patterns ==
+
+#[test]
+fn test_kubernetes_list_response() {
+    // Kubernetes pattern: {kind, apiVersion, metadata, items:[...]}
+    let fdw = fdw_with_response_path(None);
+    let mut resp = serde_json::json!({
+        "kind": "PodList",
+        "apiVersion": "v1",
+        "metadata": {"resourceVersion": "1234"},
+        "items": [
+            {"metadata": {"name": "pod-1"}, "status": {"phase": "Running"}},
+            {"metadata": {"name": "pod-2"}, "status": {"phase": "Pending"}}
+        ]
+    });
+    let rows = fdw.extract_data(&mut resp).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["metadata"]["name"], "pod-1");
+}
+
+#[test]
+fn test_elasticsearch_hits_response() {
+    // Elasticsearch pattern: response_path must be used for non-standard wrapper
+    let fdw = fdw_with_response_path(Some("/hits/hits"));
+    let mut resp = serde_json::json!({
+        "took": 5,
+        "hits": {
+            "total": {"value": 2},
+            "hits": [
+                {"_id": "1", "_source": {"title": "Doc 1"}},
+                {"_id": "2", "_source": {"title": "Doc 2"}}
+            ]
+        }
+    });
+    let rows = fdw.extract_data(&mut resp).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["_id"], "1");
+}
+
+#[test]
+fn test_graphql_style_response() {
+    // GraphQL-style: {data: {users: [...]}} — needs response_path
+    let fdw = fdw_with_response_path(Some("/data/users"));
+    let mut resp = serde_json::json!({
+        "data": {
+            "users": [
+                {"id": "1", "name": "Alice"},
+                {"id": "2", "name": "Bob"}
+            ]
+        }
+    });
+    let rows = fdw.extract_data(&mut resp).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["name"], "Alice");
+}
+
+#[test]
+fn test_jsonapi_style_response() {
+    // JSON:API pattern: {data: [{type, id, attributes}], meta}
+    let fdw = fdw_with_response_path(None);
+    let mut resp = serde_json::json!({
+        "data": [
+            {"type": "articles", "id": "1", "attributes": {"title": "JSON:API"}},
+            {"type": "articles", "id": "2", "attributes": {"title": "REST"}}
+        ],
+        "meta": {"total-pages": 1}
+    });
+    let rows = fdw.extract_data(&mut resp).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["id"], "1");
+}
+
+// == Column key map edge cases with real API patterns ==
+
+#[test]
+fn test_build_column_key_map_k8s_nested_metadata() {
+    // Kubernetes response: access nested fields via object_path
+    let rows = vec![serde_json::json!({
+        "metadata": {"name": "my-pod", "namespace": "default", "uid": "abc-123"},
+        "status": {"phase": "Running"}
+    })];
+    let map = build_key_map(&["name", "namespace", "uid"], rows, Some("/metadata"));
+    assert_eq!(
+        map,
+        vec![
+            Some(KeyMatch::Exact),
+            Some(KeyMatch::Exact),
+            Some(KeyMatch::Exact)
+        ]
+    );
+}
+
+#[test]
+fn test_build_column_key_map_github_mixed_casing() {
+    // GitHub returns mixed casing: some camelCase, some snake_case
+    let rows = vec![serde_json::json!({
+        "id": 1,
+        "node_id": "MDQ6VXNlcjE=",
+        "login": "octocat",
+        "gravatar_id": "",
+        "followers_url": "https://api.github.com/users/octocat/followers"
+    })];
+    let map = build_key_map(
+        &["id", "node_id", "login", "gravatar_id", "followers_url"],
+        rows,
+        None,
+    );
+    // All exact match — GitHub uses snake_case for these fields
+    assert!(map.iter().all(|m| matches!(m, Some(KeyMatch::Exact))));
+}
+
+#[test]
+fn test_build_column_key_map_numeric_keys() {
+    // APIs that return numeric-like keys
+    let rows = vec![serde_json::json!({
+        "200": {"description": "OK"},
+        "404": {"description": "Not Found"}
+    })];
+    // Sanitized: 200 → _200, 404 → _404
+    // to_camel_case("_200") = "200", which matches the JSON key "200" → CamelCase match
+    let map = build_key_map(&["_200", "_404"], rows, None);
+    assert_eq!(
+        map,
+        vec![Some(KeyMatch::CamelCase), Some(KeyMatch::CamelCase)]
+    );
+}
+
+// == Path parameter injection edge cases ==
+
+#[test]
+fn test_json_to_cell_path_param_bool_coercion() {
+    // Path param for boolean column
+    let mut fdw = OpenApiFdw {
+        cached_columns: vec![CachedColumn {
+            name: "active".to_string(),
+            type_oid: TypeOid::Bool,
+            camel_name: "active".to_string(),
+            lower_name: "active".to_string(),
+            alnum_name: "active".to_string(),
+        }],
+        column_key_map: vec![None],
+        ..Default::default()
+    };
+    fdw.path_params
+        .insert("active".to_string(), "true".to_string());
+
+    let obj = serde_json::json!({});
+    let cell = fdw.json_to_cell_cached(&obj, 0).unwrap();
+    assert!(matches!(cell, Some(Cell::Bool(true))));
+}
+
+#[test]
+fn test_json_to_cell_path_param_f64_coercion() {
+    // Path param for float column
+    let mut fdw = OpenApiFdw {
+        cached_columns: vec![CachedColumn {
+            name: "lat".to_string(),
+            type_oid: TypeOid::F64,
+            camel_name: "lat".to_string(),
+            lower_name: "lat".to_string(),
+            alnum_name: "lat".to_string(),
+        }],
+        column_key_map: vec![None],
+        ..Default::default()
+    };
+    fdw.path_params
+        .insert("lat".to_string(), "37.7749".to_string());
+
+    let obj = serde_json::json!({});
+    let cell = fdw.json_to_cell_cached(&obj, 0).unwrap();
+    if let Some(Cell::F64(v)) = cell {
+        assert!((v - 37.7749).abs() < f64::EPSILON);
+    } else {
+        panic!("Expected F64");
+    }
+}
+
+#[test]
+fn test_json_to_cell_path_param_invalid_number_fallback() {
+    // Path param that can't parse as target type → falls back to String
+    let mut fdw = OpenApiFdw {
+        cached_columns: vec![CachedColumn {
+            name: "id".to_string(),
+            type_oid: TypeOid::I64,
+            camel_name: "id".to_string(),
+            lower_name: "id".to_string(),
+            alnum_name: "id".to_string(),
+        }],
+        column_key_map: vec![None],
+        ..Default::default()
+    };
+    fdw.path_params
+        .insert("id".to_string(), "not-a-number".to_string());
+
+    let obj = serde_json::json!({});
+    let cell = fdw.json_to_cell_cached(&obj, 0).unwrap();
+    // i64 parse fails → falls back to Cell::String
+    assert_eq!(
+        cell_to_string(cell.as_ref().unwrap()),
+        Some("not-a-number".to_string())
+    );
+}
+
+#[test]
+fn test_json_to_cell_path_param_json_type() {
+    // Path param for JSON column
+    let mut fdw = OpenApiFdw {
+        cached_columns: vec![CachedColumn {
+            name: "filter".to_string(),
+            type_oid: TypeOid::Json,
+            camel_name: "filter".to_string(),
+            lower_name: "filter".to_string(),
+            alnum_name: "filter".to_string(),
+        }],
+        column_key_map: vec![None],
+        ..Default::default()
+    };
+    fdw.path_params
+        .insert("filter".to_string(), r#"{"status":"active"}"#.to_string());
+
+    let obj = serde_json::json!({});
+    let cell = fdw.json_to_cell_cached(&obj, 0).unwrap();
+    if let Some(Cell::Json(s)) = cell {
+        assert_eq!(s, r#"{"status":"active"}"#);
+    } else {
+        panic!("Expected Json cell");
+    }
+}
+
+// == Resolve pagination URL edge cases ==
+
+#[test]
+fn test_resolve_pagination_url_empty_string() {
+    let fdw = make_fdw_for_url("https://api.example.com", "/items");
+    let url = fdw.resolve_pagination_url("");
+    assert_eq!(url, "https://api.example.com/");
+}
+
+#[test]
+fn test_resolve_pagination_url_trailing_slash_base() {
+    // base_url is already trimmed of trailing slash in init()
+    let fdw = make_fdw_for_url("https://api.example.com", "/v2/items");
+    let url = fdw.resolve_pagination_url("/v2/items?offset=100");
+    assert_eq!(url, "https://api.example.com/v2/items?offset=100");
+}
+
+// == to_camel_case edge cases ==
+
+#[test]
+fn test_to_camel_case_with_numbers() {
+    assert_eq!(to_camel_case("field_2_name"), "field2Name");
+}
+
+#[test]
+fn test_to_camel_case_all_uppercase() {
+    // Already uppercase segments
+    assert_eq!(to_camel_case("a_b_c"), "aBC");
+}
+
+// == json_to_cell with CamelCase key match ==
+
+#[test]
+fn test_json_to_cell_camel_case_key_match() {
+    // CamelCase key match path
+    let fdw = OpenApiFdw {
+        cached_columns: vec![CachedColumn {
+            name: "created_at".to_string(),
+            type_oid: TypeOid::String,
+            camel_name: "createdAt".to_string(),
+            lower_name: "created_at".to_string(),
+            alnum_name: "createdat".to_string(),
+        }],
+        column_key_map: vec![Some(KeyMatch::CamelCase)],
+        ..Default::default()
+    };
+
+    let obj = serde_json::json!({"createdAt": "2024-01-15T10:00:00Z"});
+    let cell = fdw.json_to_cell_cached(&obj, 0).unwrap();
+    assert_eq!(
+        cell_to_string(cell.as_ref().unwrap()),
+        Some("2024-01-15T10:00:00Z".to_string())
+    );
+}
+
+#[test]
+fn test_json_to_cell_case_insensitive_key_match() {
+    // CaseInsensitive key match path
+    let fdw = OpenApiFdw {
+        cached_columns: vec![CachedColumn {
+            name: "user_name".to_string(),
+            type_oid: TypeOid::String,
+            camel_name: "userName".to_string(),
+            lower_name: "user_name".to_string(),
+            alnum_name: "username".to_string(),
+        }],
+        column_key_map: vec![Some(KeyMatch::CaseInsensitive("UserName".to_string()))],
+        ..Default::default()
+    };
+
+    let obj = serde_json::json!({"UserName": "alice"});
+    let cell = fdw.json_to_cell_cached(&obj, 0).unwrap();
+    assert_eq!(
+        cell_to_string(cell.as_ref().unwrap()),
+        Some("alice".to_string())
+    );
+}
+
+#[test]
+fn test_json_to_cell_i16_overflow() {
+    // i16 max is 32767 — 40000 should overflow
+    let obj = serde_json::json!({"val": 40000});
+    let cell = cell_from_json("val", TypeOid::I16, &obj).unwrap();
+    assert!(cell.is_none());
+}
+
+#[test]
+fn test_json_to_cell_i32_overflow() {
+    // i32 max is 2147483647 — 3 billion should overflow
+    let obj = serde_json::json!({"val": 3_000_000_000_i64});
+    let cell = cell_from_json("val", TypeOid::I32, &obj).unwrap();
+    assert!(cell.is_none());
+}
+
+#[test]
+fn test_json_to_cell_json_string_value() {
+    // JSON column with plain string value → serialize as JSON string
+    let obj = serde_json::json!({"data": "hello"});
+    let cell = cell_from_json("data", TypeOid::Json, &obj).unwrap();
+    if let Some(Cell::Json(s)) = cell {
+        assert_eq!(s, r#""hello""#);
+    } else {
+        panic!("Expected Json cell");
+    }
+}
+
+#[test]
+fn test_json_to_cell_json_bool_value() {
+    // JSON column with bool value
+    let obj = serde_json::json!({"flag": true});
+    let cell = cell_from_json("flag", TypeOid::Json, &obj).unwrap();
+    if let Some(Cell::Json(s)) = cell {
+        assert_eq!(s, "true");
+    } else {
+        panic!("Expected Json cell");
+    }
+}

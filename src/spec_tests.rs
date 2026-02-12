@@ -2123,6 +2123,870 @@ fn test_empty_type_array() {
     assert!(!schema.nullable);
 }
 
+// --- OpenAPI 3.1 full READ operation coverage tests ---
+// Based on real-world OpenAPI 3.1 schemas from GitHub, Stripe, Kubernetes, and others.
+
+#[test]
+fn test_github_31_nullable_allof_with_ref() {
+    // GitHub API 3.1 pattern: property is allOf + nullable for merged nullable refs
+    // Example: pull_request.head.repo is allOf: [{$ref: "#/components/schemas/repository"}]
+    // with nullable: true on the outer property
+    let spec_json = r##"{
+        "openapi": "3.1.0",
+        "info": {"title": "GitHub", "version": "1.0"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "repository": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "full_name": {"type": "string"},
+                        "private": {"type": "boolean"}
+                    },
+                    "required": ["id", "full_name"]
+                },
+                "pull-request": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "title": {"type": "string"},
+                        "head_repo": {
+                            "allOf": [
+                                {"$ref": "#/components/schemas/repository"}
+                            ],
+                            "nullable": true
+                        }
+                    }
+                }
+            }
+        }
+    }"##;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let pr = spec
+        .resolve_ref("#/components/schemas/pull-request")
+        .unwrap();
+    let resolved = spec.resolve_schema(pr);
+
+    assert!(resolved.properties.contains_key("head_repo"));
+    let head_repo = resolved.properties.get("head_repo").unwrap();
+    // The nullable flag on the outer property should carry through
+    // allOf with a single $ref should resolve to that ref's properties
+    let head_resolved = spec.resolve_schema(head_repo);
+    assert!(head_resolved.properties.contains_key("id"));
+    assert!(head_resolved.properties.contains_key("full_name"));
+}
+
+#[test]
+fn test_github_31_nullable_simple_user_ref() {
+    // GitHub 3.1: nullable-simple-user is used everywhere as:
+    //   "assignee": { "anyOf": [{"$ref": "..."}, {"type": "null"}] }
+    // This tests the full resolution chain with nullable merging
+    let spec_json = r##"{
+        "openapi": "3.1.0",
+        "info": {"title": "GitHub", "version": "1.0"},
+        "paths": {
+            "/repos/issues": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "array",
+                                        "items": {"$ref": "#/components/schemas/issue"}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "components": {
+            "schemas": {
+                "simple-user": {
+                    "type": "object",
+                    "properties": {
+                        "login": {"type": "string"},
+                        "id": {"type": "integer"},
+                        "avatar_url": {"type": "string", "format": "uri"}
+                    },
+                    "required": ["login", "id", "avatar_url"]
+                },
+                "issue": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "number": {"type": "integer"},
+                        "title": {"type": "string"},
+                        "state": {"type": "string"},
+                        "assignee": {
+                            "anyOf": [
+                                {"$ref": "#/components/schemas/simple-user"},
+                                {"type": "null"}
+                            ]
+                        },
+                        "labels": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": {"type": "integer"},
+                                    "name": {"type": "string"},
+                                    "color": {"type": "string"}
+                                }
+                            }
+                        }
+                    },
+                    "required": ["id", "number", "title", "state"]
+                }
+            }
+        }
+    }"##;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let endpoints = spec.get_endpoints();
+    assert_eq!(endpoints.len(), 1);
+
+    let schema = endpoints[0].response_schema.as_ref().unwrap();
+    let resolved = spec.resolve_schema(schema);
+    let items = resolved.items.as_ref().unwrap();
+    let item_resolved = spec.resolve_schema(items);
+
+    assert!(item_resolved.properties.contains_key("id"));
+    assert!(item_resolved.properties.contains_key("title"));
+    assert!(item_resolved.properties.contains_key("assignee"));
+    assert!(item_resolved.properties.contains_key("labels"));
+
+    // assignee resolves to simple-user properties via anyOf
+    let assignee = item_resolved.properties.get("assignee").unwrap();
+    let assignee_resolved = spec.resolve_schema(assignee);
+    assert!(assignee_resolved.properties.contains_key("login"));
+}
+
+#[test]
+fn test_kubernetes_allof_with_description_only_ref() {
+    // Kubernetes pattern: allOf with one $ref and one schema that only has description
+    // (no properties, no type — just metadata). Should not break resolution.
+    let spec_json = r##"{
+        "openapi": "3.0.0",
+        "info": {"title": "K8s", "version": "1.0"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "ObjectMeta": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "namespace": {"type": "string"}
+                    }
+                },
+                "Pod": {
+                    "type": "object",
+                    "properties": {
+                        "metadata": {
+                            "allOf": [
+                                {"$ref": "#/components/schemas/ObjectMeta"},
+                                {}
+                            ]
+                        },
+                        "kind": {"type": "string"}
+                    }
+                }
+            }
+        }
+    }"##;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let pod = spec.resolve_ref("#/components/schemas/Pod").unwrap();
+    let resolved = spec.resolve_schema(pod);
+
+    assert!(resolved.properties.contains_key("metadata"));
+    assert!(resolved.properties.contains_key("kind"));
+
+    let meta = resolved.properties.get("metadata").unwrap();
+    let meta_resolved = spec.resolve_schema(meta);
+    assert!(meta_resolved.properties.contains_key("name"));
+    assert!(meta_resolved.properties.contains_key("namespace"));
+}
+
+#[test]
+fn test_stripe_31_expandable_field_string_or_ref() {
+    // Stripe 3.1 uses anyOf: [{maxLength:5000, type:"string"}, {$ref:"..."}]
+    // for expandable fields (default: string ID, expanded: full object)
+    let spec_json = r##"{
+        "openapi": "3.1.0",
+        "info": {"title": "Stripe", "version": "1.0"},
+        "paths": {
+            "/v1/charges": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "data": {
+                                                "type": "array",
+                                                "items": {"$ref": "#/components/schemas/charge"}
+                                            },
+                                            "has_more": {"type": "boolean"},
+                                            "url": {"type": "string"}
+                                        },
+                                        "required": ["data", "has_more", "url"]
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "components": {
+            "schemas": {
+                "customer": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "email": {"type": ["string", "null"]},
+                        "name": {"type": ["string", "null"]}
+                    },
+                    "required": ["id"]
+                },
+                "charge": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "amount": {"type": "integer"},
+                        "currency": {"type": "string"},
+                        "created": {"type": "integer", "format": "unix-time"},
+                        "customer": {
+                            "anyOf": [
+                                {"type": "string"},
+                                {"$ref": "#/components/schemas/customer"}
+                            ]
+                        },
+                        "metadata": {"type": "object"}
+                    },
+                    "required": ["id", "amount", "currency", "created"]
+                }
+            }
+        }
+    }"##;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let endpoints = spec.get_endpoints();
+    assert_eq!(endpoints.len(), 1);
+
+    let schema = endpoints[0].response_schema.as_ref().unwrap();
+    assert!(schema.properties.contains_key("data"));
+    assert!(schema.properties.contains_key("has_more"));
+
+    // Verify nested charge schema resolution
+    let data = schema.properties.get("data").unwrap();
+    let items = data.items.as_ref().unwrap();
+    let charge_resolved = spec.resolve_schema(items);
+    assert!(charge_resolved.properties.contains_key("id"));
+    assert!(charge_resolved.properties.contains_key("amount"));
+    assert!(charge_resolved.properties.contains_key("created"));
+
+    // created has format: unix-time
+    let created = charge_resolved.properties.get("created").unwrap();
+    assert_eq!(created.format, Some("unix-time".to_string()));
+}
+
+#[test]
+fn test_ref_with_write_only_sibling() {
+    // OpenAPI 3.1: $ref + writeOnly sibling should merge writeOnly into resolved schema
+    let spec_json = r##"{
+        "openapi": "3.1.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "Credentials": {
+                    "type": "object",
+                    "properties": {
+                        "token": {"type": "string"}
+                    }
+                },
+                "User": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "auth": {
+                            "$ref": "#/components/schemas/Credentials",
+                            "writeOnly": true
+                        }
+                    }
+                }
+            }
+        }
+    }"##;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let user = spec.resolve_ref("#/components/schemas/User").unwrap();
+    let resolved = spec.resolve_schema(user);
+
+    let auth = resolved.properties.get("auth").unwrap();
+    let auth_resolved = spec.resolve_schema(auth);
+    assert!(auth_resolved.write_only);
+    assert!(auth_resolved.properties.contains_key("token"));
+}
+
+#[test]
+fn test_openapi_31_version_string_accepted() {
+    // OpenAPI 3.1.0 should be accepted as valid 3.x
+    let spec_json = r#"{
+        "openapi": "3.1.0",
+        "info": {"title": "Test 3.1", "version": "1.0"},
+        "paths": {}
+    }"#;
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    assert_eq!(spec.openapi, "3.1.0");
+}
+
+#[test]
+fn test_openapi_31_minor_version_accepted() {
+    // Future 3.x versions (e.g., 3.2.0) should also be accepted
+    let spec_json = r#"{
+        "openapi": "3.2.0",
+        "info": {"title": "Future", "version": "1.0"},
+        "paths": {}
+    }"#;
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    assert_eq!(spec.openapi, "3.2.0");
+}
+
+#[test]
+fn test_response_ref_chain_through_components() {
+    // Response uses $ref to components/responses, which itself contains a schema $ref
+    let spec_json = r##"{
+        "openapi": "3.0.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {
+            "/pets": {
+                "get": {
+                    "responses": {
+                        "200": {"$ref": "#/components/responses/PetList"}
+                    }
+                }
+            }
+        },
+        "components": {
+            "responses": {
+                "PetList": {
+                    "description": "A list of pets",
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "array",
+                                "items": {"$ref": "#/components/schemas/Pet"}
+                            }
+                        }
+                    }
+                }
+            },
+            "schemas": {
+                "Pet": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "name": {"type": "string"},
+                        "species": {"type": "string"}
+                    },
+                    "required": ["id", "name"]
+                }
+            }
+        }
+    }"##;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let endpoints = spec.get_endpoints();
+    assert_eq!(endpoints.len(), 1);
+
+    let schema = endpoints[0].response_schema.as_ref().unwrap();
+    let items = schema.items.as_ref().unwrap();
+    let resolved = spec.resolve_schema(items);
+    assert!(resolved.properties.contains_key("id"));
+    assert!(resolved.properties.contains_key("name"));
+    assert!(resolved.properties.contains_key("species"));
+}
+
+#[test]
+fn test_openapi_31_nullable_object_type_array() {
+    // OpenAPI 3.1: type: ["object", "null"] — nullable object
+    let schema: Schema = serde_json::from_str(
+        r#"{"type": ["object", "null"], "properties": {"key": {"type": "string"}}}"#,
+    )
+    .unwrap();
+    assert_eq!(schema.schema_type, Some("object".to_string()));
+    assert!(schema.nullable);
+    assert!(schema.properties.contains_key("key"));
+}
+
+#[test]
+fn test_openapi_31_nullable_integer_type_array() {
+    // OpenAPI 3.1: type: ["integer", "null"] with format
+    let schema: Schema =
+        serde_json::from_str(r#"{"type": ["integer", "null"], "format": "int32"}"#).unwrap();
+    assert_eq!(schema.schema_type, Some("integer".to_string()));
+    assert!(schema.nullable);
+    assert_eq!(schema.format, Some("int32".to_string()));
+}
+
+#[test]
+fn test_openapi_31_nullable_number_type_array() {
+    // OpenAPI 3.1: type: ["number", "null"] with format: double
+    let schema: Schema =
+        serde_json::from_str(r#"{"type": ["number", "null"], "format": "double"}"#).unwrap();
+    assert_eq!(schema.schema_type, Some("number".to_string()));
+    assert!(schema.nullable);
+    assert_eq!(schema.format, Some("double".to_string()));
+}
+
+#[test]
+fn test_mixed_allof_and_type_array_31() {
+    // OpenAPI 3.1: allOf with type arrays inside sub-schemas
+    let spec_json = r#"{
+        "openapi": "3.1.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "Combined": {
+                    "allOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "integer"},
+                                "name": {"type": ["string", "null"]}
+                            },
+                            "required": ["id"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "email": {"type": ["string", "null"]},
+                                "count": {"type": ["integer", "null"]}
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+    }"#;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let combined = spec.resolve_ref("#/components/schemas/Combined").unwrap();
+    let resolved = spec.resolve_schema(combined);
+
+    assert!(resolved.properties.contains_key("id"));
+    assert!(resolved.properties.contains_key("name"));
+    assert!(resolved.properties.contains_key("email"));
+    assert!(resolved.properties.contains_key("count"));
+
+    // id is required and not nullable
+    assert!(resolved.required.contains(&"id".to_string()));
+
+    // name should be nullable (from type array)
+    let name = resolved.properties.get("name").unwrap();
+    assert!(name.nullable);
+    assert_eq!(name.schema_type, Some("string".to_string()));
+
+    // count should be nullable
+    let count = resolved.properties.get("count").unwrap();
+    assert!(count.nullable);
+    assert_eq!(count.schema_type, Some("integer".to_string()));
+}
+
+#[test]
+fn test_twilio_nested_schema_ref_in_response() {
+    // Twilio pattern: response has inline wrapper with $ref items
+    let spec_json = r##"{
+        "openapi": "3.0.0",
+        "info": {"title": "Twilio", "version": "1.0"},
+        "paths": {
+            "/Accounts": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "accounts": {
+                                                "type": "array",
+                                                "items": {"$ref": "#/components/schemas/Account"}
+                                            },
+                                            "page": {"type": "integer"},
+                                            "page_size": {"type": "integer"}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "components": {
+            "schemas": {
+                "Account": {
+                    "type": "object",
+                    "properties": {
+                        "sid": {"type": "string"},
+                        "friendly_name": {"type": "string"},
+                        "status": {"type": "string"},
+                        "date_created": {"type": "string", "format": "date-time"}
+                    },
+                    "required": ["sid"]
+                }
+            }
+        }
+    }"##;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let endpoints = spec.get_endpoints();
+    assert_eq!(endpoints.len(), 1);
+
+    let schema = endpoints[0].response_schema.as_ref().unwrap();
+    // Twilio wraps in "accounts" key
+    assert!(schema.properties.contains_key("accounts"));
+
+    let accounts = schema.properties.get("accounts").unwrap();
+    let items = accounts.items.as_ref().unwrap();
+    let resolved = spec.resolve_schema(items);
+    assert!(resolved.properties.contains_key("sid"));
+    assert!(resolved.properties.contains_key("friendly_name"));
+    assert!(resolved.properties.contains_key("date_created"));
+}
+
+#[test]
+fn test_oneof_with_null_type_31() {
+    // OpenAPI 3.1: oneOf: [{$ref: "..."}, {type: "null"}] — common nullable pattern
+    // Different from anyOf: semantically "exactly one", but for nullable refs identical behavior
+    let spec_json = r##"{
+        "openapi": "3.1.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "Address": {
+                    "type": "object",
+                    "properties": {
+                        "street": {"type": "string"},
+                        "city": {"type": "string"},
+                        "zip": {"type": "string"}
+                    }
+                },
+                "Order": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "shipping_address": {
+                            "oneOf": [
+                                {"$ref": "#/components/schemas/Address"},
+                                {"type": "null"}
+                            ]
+                        }
+                    }
+                }
+            }
+        }
+    }"##;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let order = spec.resolve_ref("#/components/schemas/Order").unwrap();
+    let resolved = spec.resolve_schema(order);
+
+    let shipping = resolved.properties.get("shipping_address").unwrap();
+    let shipping_resolved = spec.resolve_schema(shipping);
+    // Should have Address properties from the non-null variant
+    assert!(shipping_resolved.properties.contains_key("street"));
+    assert!(shipping_resolved.properties.contains_key("city"));
+    assert!(shipping_resolved.properties.contains_key("zip"));
+}
+
+#[test]
+fn test_empty_paths_valid_spec() {
+    // Valid spec with no paths (e.g., webhook-only APIs)
+    let spec_json = r#"{
+        "openapi": "3.1.0",
+        "info": {"title": "Webhooks Only", "version": "1.0"},
+        "paths": {}
+    }"#;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let endpoints = spec.get_endpoints();
+    assert!(endpoints.is_empty());
+}
+
+#[test]
+fn test_multiple_servers_uses_first() {
+    // Multiple servers — base_url should come from the first one
+    let spec_json = r#"{
+        "openapi": "3.0.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "servers": [
+            {"url": "https://api.production.com"},
+            {"url": "https://api.staging.com"},
+            {"url": "https://api.dev.com"}
+        ],
+        "paths": {}
+    }"#;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    assert_eq!(
+        spec.base_url(),
+        Some("https://api.production.com".to_string())
+    );
+}
+
+#[test]
+fn test_no_servers_returns_none() {
+    // No servers array — base_url should be None
+    let spec_json = r#"{
+        "openapi": "3.0.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {}
+    }"#;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    assert_eq!(spec.base_url(), None);
+}
+
+#[test]
+fn test_openapi_31_const_ignored_gracefully() {
+    // OpenAPI 3.1 introduced "const" (from JSON Schema). Our parser should ignore it
+    // gracefully since serde skips unknown fields.
+    let schema: Schema = serde_json::from_str(r#"{"type": "string", "const": "active"}"#).unwrap();
+    assert_eq!(schema.schema_type, Some("string".to_string()));
+}
+
+#[test]
+fn test_openapi_31_examples_ignored_gracefully() {
+    // OpenAPI 3.1: "examples" (array) replaces "example" (singular). Should be ignored.
+    let schema: Schema =
+        serde_json::from_str(r#"{"type": "string", "examples": ["foo", "bar"]}"#).unwrap();
+    assert_eq!(schema.schema_type, Some("string".to_string()));
+}
+
+#[test]
+fn test_allof_empty_schemas() {
+    // Edge case: allOf with empty sub-schemas — should produce empty merged result
+    let spec_json = r#"{
+        "openapi": "3.0.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "Empty": {
+                    "allOf": [{}, {}]
+                }
+            }
+        }
+    }"#;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let empty = spec.resolve_ref("#/components/schemas/Empty").unwrap();
+    let resolved = spec.resolve_schema(empty);
+    assert!(resolved.properties.is_empty());
+    // No properties → schema_type should not be "object"
+    assert_eq!(resolved.schema_type, None);
+}
+
+#[test]
+fn test_anyof_all_primitives() {
+    // anyOf with only primitive types (no objects) → None type (jsonb)
+    let spec_json = r#"{
+        "openapi": "3.0.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "Flexible": {
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": "integer"},
+                        {"type": "boolean"}
+                    ]
+                }
+            }
+        }
+    }"#;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let flexible = spec.resolve_ref("#/components/schemas/Flexible").unwrap();
+    let resolved = spec.resolve_schema(flexible);
+    // All primitives, no properties → schema_type should be None (jsonb)
+    assert_eq!(resolved.schema_type, None);
+    assert!(resolved.properties.is_empty());
+}
+
+#[test]
+fn test_response_schema_from_array_ref() {
+    // Response schema is a $ref to an array schema (not inlined)
+    let spec_json = r##"{
+        "openapi": "3.0.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {
+            "/users": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/UserList"}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "components": {
+            "schemas": {
+                "User": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "login": {"type": "string"}
+                    }
+                },
+                "UserList": {
+                    "type": "array",
+                    "items": {"$ref": "#/components/schemas/User"}
+                }
+            }
+        }
+    }"##;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let endpoints = spec.get_endpoints();
+    assert_eq!(endpoints.len(), 1);
+
+    // The response schema is a $ref to UserList (array type)
+    let schema = endpoints[0].response_schema.as_ref().unwrap();
+    assert!(schema.reference.is_some());
+
+    let resolved = spec.resolve_schema(schema);
+    assert_eq!(resolved.schema_type, Some("array".to_string()));
+    let items = resolved.items.as_ref().unwrap();
+    let item_resolved = spec.resolve_schema(items);
+    assert!(item_resolved.properties.contains_key("id"));
+    assert!(item_resolved.properties.contains_key("login"));
+}
+
+#[test]
+fn test_oneof_mixed_object_and_primitive() {
+    // oneOf: [{type: "object", properties: {...}}, {type: "string"}]
+    // Common in APIs that return either a structured error or a simple value
+    let spec_json = r#"{
+        "openapi": "3.0.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "Result": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "data": {"type": "string"},
+                                "status": {"type": "integer"}
+                            }
+                        },
+                        {"type": "string"}
+                    ]
+                }
+            }
+        }
+    }"#;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let result = spec.resolve_ref("#/components/schemas/Result").unwrap();
+    let resolved = spec.resolve_schema(result);
+
+    // Should have properties from the object variant
+    assert!(resolved.properties.contains_key("data"));
+    assert!(resolved.properties.contains_key("status"));
+    // schema_type should be "object" because at least one variant has properties
+    assert_eq!(resolved.schema_type, Some("object".to_string()));
+}
+
+#[test]
+fn test_allof_with_required_dedup() {
+    // allOf where multiple schemas specify the same required field
+    let spec_json = r##"{
+        "openapi": "3.0.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "Merged": {
+                    "allOf": [
+                        {
+                            "type": "object",
+                            "properties": {"id": {"type": "string"}},
+                            "required": ["id"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {"name": {"type": "string"}},
+                            "required": ["id", "name"]
+                        }
+                    ]
+                }
+            }
+        }
+    }"##;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let merged = spec.resolve_ref("#/components/schemas/Merged").unwrap();
+    let resolved = spec.resolve_schema(merged);
+
+    // "id" should appear only once in required (deduplicated)
+    assert_eq!(
+        resolved.required.iter().filter(|r| *r == "id").count(),
+        1,
+        "Required should be deduplicated"
+    );
+    assert!(resolved.required.contains(&"name".to_string()));
+}
+
+#[test]
+fn test_response_ref_broken_gracefully() {
+    // Response $ref pointing to nonexistent components/responses — should still work
+    let spec_json = r##"{
+        "openapi": "3.0.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {
+            "/items": {
+                "get": {
+                    "responses": {
+                        "200": {"$ref": "#/components/responses/NonExistent"}
+                    }
+                }
+            }
+        }
+    }"##;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let endpoints = spec.get_endpoints();
+    assert_eq!(endpoints.len(), 1);
+    // Broken ref → no schema
+    assert!(endpoints[0].response_schema.is_none());
+}
+
 #[test]
 fn test_allof_with_properties_sibling() {
     // K8s-style: allOf + sibling properties → allOf takes priority (sibling properties

@@ -687,3 +687,438 @@ fn test_sanitize_leading_underscore_preserved() {
     // _id stays _id (leading underscore preserved)
     assert_eq!(sanitize_column_name("_id"), "_id");
 }
+
+// --- OpenAPI 3.1 DDL generation and type mapping coverage ---
+
+#[test]
+fn test_extract_columns_from_ref_array_schema() {
+    // Schema is a $ref to an array of objects — should extract items properties
+    let spec = OpenApiSpec::from_str(
+        r##"{
+        "openapi": "3.0.0",
+        "info": {"title": "Test"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "User": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "name": {"type": "string"}
+                    },
+                    "required": ["id"]
+                },
+                "UserList": {
+                    "type": "array",
+                    "items": {"$ref": "#/components/schemas/User"}
+                }
+            }
+        }
+    }"##,
+    )
+    .unwrap();
+
+    let schema = spec.resolve_ref("#/components/schemas/UserList").unwrap();
+    let columns = extract_columns(schema, &spec, false);
+
+    let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+    assert!(names.contains(&"id"), "Missing id in {names:?}");
+    assert!(names.contains(&"name"), "Missing name in {names:?}");
+
+    let id_col = columns.iter().find(|c| c.name == "id").unwrap();
+    assert_eq!(id_col.pg_type, "bigint");
+    assert!(!id_col.nullable);
+
+    let name_col = columns.iter().find(|c| c.name == "name").unwrap();
+    assert_eq!(name_col.pg_type, "text");
+    assert!(name_col.nullable); // not in required list
+}
+
+#[test]
+fn test_extract_columns_from_allof_resolved() {
+    // Schema with allOf — extract_columns should resolve and merge
+    let spec = OpenApiSpec::from_str(
+        r##"{
+        "openapi": "3.0.0",
+        "info": {"title": "Test"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "Base": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"}
+                    },
+                    "required": ["id"]
+                },
+                "Extended": {
+                    "allOf": [
+                        {"$ref": "#/components/schemas/Base"},
+                        {
+                            "type": "object",
+                            "properties": {
+                                "email": {"type": "string", "format": "email"},
+                                "created_at": {"type": "string", "format": "date-time"}
+                            },
+                            "required": ["email"]
+                        }
+                    ]
+                }
+            }
+        }
+    }"##,
+    )
+    .unwrap();
+
+    let schema = spec.resolve_ref("#/components/schemas/Extended").unwrap();
+    let columns = extract_columns(schema, &spec, false);
+
+    let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+    assert!(names.contains(&"id"));
+    assert!(names.contains(&"email"));
+    assert!(names.contains(&"created_at"));
+
+    // id is required + not nullable → NOT NULL
+    let id_col = columns.iter().find(|c| c.name == "id").unwrap();
+    assert!(!id_col.nullable);
+
+    // email is required + not nullable → NOT NULL
+    let email_col = columns.iter().find(|c| c.name == "email").unwrap();
+    assert!(!email_col.nullable);
+    assert_eq!(email_col.pg_type, "text"); // format: "email" → text
+
+    // created_at is not required → nullable
+    let created_col = columns.iter().find(|c| c.name == "created_at").unwrap();
+    assert!(created_col.nullable);
+    assert_eq!(created_col.pg_type, "timestamptz");
+}
+
+#[test]
+fn test_generate_foreign_table_single_quote_in_endpoint() {
+    // Endpoint with single quotes — should be escaped in SQL
+    let spec =
+        OpenApiSpec::from_str(r#"{"openapi": "3.0.0", "info": {"title": "T"}, "paths": {}}"#)
+            .unwrap();
+
+    let endpoint = crate::spec::EndpointInfo {
+        path: "/o'reilly/books".to_string(),
+        method: "GET".to_string(),
+        response_schema: None,
+    };
+    let table = generate_foreign_table(&endpoint, &spec, "test_server", false);
+    // Single quote should be doubled in SQL
+    assert!(
+        table.contains("endpoint '/o''reilly/books'"),
+        "Should escape single quotes: {table}"
+    );
+}
+
+#[test]
+fn test_quote_identifier_with_double_quote() {
+    // Table name with double quote — should be doubled in identifier quoting
+    let endpoint = crate::spec::EndpointInfo {
+        path: "/he\"llo".to_string(),
+        method: "GET".to_string(),
+        response_schema: None,
+    };
+    let table_name = endpoint.table_name();
+    assert_eq!(table_name, "he\"llo");
+
+    // The DDL should handle the double-quote
+    let spec =
+        OpenApiSpec::from_str(r#"{"openapi": "3.0.0", "info": {"title": "T"}, "paths": {}}"#)
+            .unwrap();
+    let ddl = generate_foreign_table(&endpoint, &spec, "test_server", false);
+    assert!(
+        ddl.contains(r#""he""llo""#),
+        "Double quotes should be doubled: {ddl}"
+    );
+}
+
+#[test]
+fn test_full_ddl_from_openapi_31_spec() {
+    // Full end-to-end: OpenAPI 3.1 spec → DDL with correct type arrays
+    let spec = OpenApiSpec::from_str(
+        r#"{
+        "openapi": "3.1.0",
+        "info": {"title": "Test 3.1 API", "version": "1.0"},
+        "paths": {
+            "/users": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "id": {"type": "integer"},
+                                                "name": {"type": "string"},
+                                                "bio": {"type": ["string", "null"]},
+                                                "age": {"type": ["integer", "null"], "format": "int32"},
+                                                "score": {"type": ["number", "null"], "format": "float"},
+                                                "active": {"type": ["boolean", "null"]},
+                                                "tags": {"type": "array", "items": {"type": "string"}},
+                                                "metadata": {"type": "object"}
+                                            },
+                                            "required": ["id", "name"]
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }"#,
+    )
+    .unwrap();
+
+    let tables = generate_all_tables(&spec, "api_server", None, false, true);
+    assert_eq!(tables.len(), 1);
+
+    let ddl = &tables[0];
+
+    // Check column types
+    assert!(ddl.contains("\"id\" bigint NOT NULL"), "id: {ddl}");
+    assert!(ddl.contains("\"name\" text NOT NULL"), "name: {ddl}");
+    assert!(
+        ddl.contains("\"bio\" text"),
+        "bio should be nullable text: {ddl}"
+    );
+    assert!(
+        ddl.contains("\"age\" integer"),
+        "age should be int32: {ddl}"
+    );
+    assert!(
+        ddl.contains("\"score\" real"),
+        "score should be float: {ddl}"
+    );
+    assert!(ddl.contains("\"active\" boolean"), "active: {ddl}");
+    assert!(ddl.contains("\"tags\" jsonb"), "tags array → jsonb: {ddl}");
+    assert!(
+        ddl.contains("\"metadata\" jsonb"),
+        "metadata object → jsonb: {ddl}"
+    );
+    assert!(ddl.contains("\"attrs\" jsonb"), "attrs column: {ddl}");
+
+    // id column should be rowid
+    assert!(ddl.contains("rowid_column 'id'"), "rowid: {ddl}");
+
+    // bio and age should NOT have NOT NULL (they're nullable via type arrays)
+    assert!(
+        !ddl.contains("\"bio\" text NOT NULL"),
+        "bio should be nullable: {ddl}"
+    );
+    assert!(
+        !ddl.contains("\"age\" integer NOT NULL"),
+        "age should be nullable: {ddl}"
+    );
+}
+
+#[test]
+fn test_openapi_to_pg_type_ref_resolved() {
+    // Type mapping with $ref — should resolve the ref before mapping
+    let spec = OpenApiSpec::from_str(
+        r##"{
+        "openapi": "3.0.0",
+        "info": {"title": "Test"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "UserId": {
+                    "type": "string",
+                    "format": "uuid"
+                }
+            }
+        }
+    }"##,
+    )
+    .unwrap();
+
+    let ref_schema = crate::spec::Schema {
+        reference: Some("#/components/schemas/UserId".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(openapi_to_pg_type(&ref_schema, &spec), "uuid");
+}
+
+#[test]
+fn test_extract_columns_nullable_required_interaction() {
+    // Column is both required AND nullable (OpenAPI 3.1 type arrays)
+    // → should be nullable (nullable overrides required)
+    let spec =
+        OpenApiSpec::from_str(r#"{"openapi": "3.1.0", "info": {"title": "T"}, "paths": {}}"#)
+            .unwrap();
+
+    let mut properties = HashMap::new();
+    properties.insert(
+        "email".to_string(),
+        crate::spec::Schema {
+            schema_type: Some("string".to_string()),
+            nullable: true, // from type: ["string", "null"]
+            ..Default::default()
+        },
+    );
+
+    let schema = crate::spec::Schema {
+        schema_type: Some("object".to_string()),
+        properties,
+        required: vec!["email".to_string()],
+        ..Default::default()
+    };
+
+    let columns = extract_columns(&schema, &spec, false);
+    let email = columns.iter().find(|c| c.name == "email").unwrap();
+    // required=true but nullable=true → column should be nullable
+    assert!(email.nullable, "nullable should override required");
+}
+
+#[test]
+fn test_extract_columns_write_only_in_allof() {
+    // writeOnly property inside allOf should still be filtered
+    let spec = OpenApiSpec::from_str(
+        r##"{
+        "openapi": "3.0.0",
+        "info": {"title": "Test"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "User": {
+                    "allOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "integer"},
+                                "password": {"type": "string", "writeOnly": true}
+                            }
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"}
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+    }"##,
+    )
+    .unwrap();
+
+    let user = spec.resolve_ref("#/components/schemas/User").unwrap();
+    let columns = extract_columns(user, &spec, false);
+    let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+
+    assert!(names.contains(&"id"));
+    assert!(names.contains(&"name"));
+    assert!(
+        !names.contains(&"password"),
+        "writeOnly in allOf should be excluded"
+    );
+}
+
+#[test]
+fn test_generate_foreign_table_with_attrs_existing() {
+    // Schema already has an "attrs" property — should not duplicate
+    let spec =
+        OpenApiSpec::from_str(r#"{"openapi": "3.0.0", "info": {"title": "T"}, "paths": {}}"#)
+            .unwrap();
+
+    let mut properties = HashMap::new();
+    properties.insert(
+        "id".to_string(),
+        crate::spec::Schema {
+            schema_type: Some("string".to_string()),
+            ..Default::default()
+        },
+    );
+    properties.insert(
+        "attrs".to_string(),
+        crate::spec::Schema {
+            schema_type: Some("object".to_string()),
+            ..Default::default()
+        },
+    );
+
+    let schema = crate::spec::Schema {
+        schema_type: Some("object".to_string()),
+        properties,
+        ..Default::default()
+    };
+
+    let columns = extract_columns(&schema, &spec, true);
+    let attrs_count = columns.iter().filter(|c| c.name == "attrs").count();
+    assert_eq!(attrs_count, 1, "Should not duplicate existing attrs column");
+}
+
+#[test]
+fn test_sanitize_column_name_unicode() {
+    // Unicode letters are alphanumeric, so they pass through (lowercased)
+    assert_eq!(sanitize_column_name("café"), "café");
+    assert_eq!(sanitize_column_name("naïve"), "naïve");
+    // Non-letter unicode (e.g., emoji) → underscore
+    assert_eq!(sanitize_column_name("key→val"), "key_val");
+}
+
+#[test]
+fn test_sanitize_column_name_all_special() {
+    // All special characters
+    assert_eq!(sanitize_column_name("@#$"), "___");
+}
+
+#[test]
+fn test_sanitize_column_name_mixed_digits_and_uppercase() {
+    // Mix of digits and uppercase in camelCase
+    assert_eq!(sanitize_column_name("ipV4Address"), "ip_v4_address");
+    assert_eq!(sanitize_column_name("x509Certificate"), "x509_certificate");
+}
+
+#[test]
+fn test_generate_all_tables_post_method_in_ddl() {
+    // POST endpoint should include method option in DDL
+    let spec = OpenApiSpec::from_str(
+        r#"{
+        "openapi": "3.0.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {
+            "/search": {
+                "post": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "id": {"type": "string"},
+                                                "score": {"type": "number"}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }"#,
+    )
+    .unwrap();
+
+    let tables = generate_all_tables(&spec, "api_server", None, false, false);
+    assert_eq!(tables.len(), 1);
+    let ddl = &tables[0];
+    assert!(ddl.contains("\"search_post\""), "Table name: {ddl}");
+    assert!(ddl.contains("method 'POST'"), "Method option: {ddl}");
+    assert!(ddl.contains("endpoint '/search'"), "Endpoint option: {ddl}");
+}
