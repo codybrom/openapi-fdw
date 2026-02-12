@@ -246,13 +246,11 @@ fn test_column_name_collision_dedup() {
     // Both should exist, one with a suffix
     assert!(
         names.contains(&"user_name"),
-        "Expected user_name in {:?}",
-        names
+        "Expected user_name in {names:?}",
     );
     assert!(
         names.contains(&"user_name_1"),
-        "Expected user_name_1 for collision in {:?}",
-        names
+        "Expected user_name_1 for collision in {names:?}",
     );
 }
 
@@ -443,4 +441,249 @@ fn test_generate_foreign_table_get_no_method() {
         "GET DDL should NOT include method option: {table}"
     );
     assert!(table.contains("endpoint '/items'"));
+}
+
+// --- OpenAPI 3.1 type mapping and DDL generation tests ---
+
+#[test]
+fn test_int64_format_explicit() {
+    // integer + format: "int64" → bigint
+    let spec =
+        OpenApiSpec::from_str(r#"{"openapi": "3.0.0", "info": {"title": "T"}, "paths": {}}"#)
+            .unwrap();
+
+    let schema = crate::spec::Schema {
+        schema_type: Some("integer".to_string()),
+        format: Some("int64".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(openapi_to_pg_type(&schema, &spec), "bigint");
+}
+
+#[test]
+fn test_double_format_explicit() {
+    // number + format: "double" → double precision
+    let spec =
+        OpenApiSpec::from_str(r#"{"openapi": "3.0.0", "info": {"title": "T"}, "paths": {}}"#)
+            .unwrap();
+
+    let schema = crate::spec::Schema {
+        schema_type: Some("number".to_string()),
+        format: Some("double".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(openapi_to_pg_type(&schema, &spec), "double precision");
+}
+
+#[test]
+fn test_unknown_string_format_fallback() {
+    // Unknown string formats (email, uri, hostname, ipv4, ipv6, password) → text
+    let spec =
+        OpenApiSpec::from_str(r#"{"openapi": "3.0.0", "info": {"title": "T"}, "paths": {}}"#)
+            .unwrap();
+
+    for fmt in &["email", "uri", "hostname", "ipv4", "ipv6", "password"] {
+        let schema = crate::spec::Schema {
+            schema_type: Some("string".to_string()),
+            format: Some(fmt.to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            openapi_to_pg_type(&schema, &spec),
+            "text",
+            "format '{fmt}' should map to text",
+        );
+    }
+}
+
+#[test]
+fn test_extract_columns_github_type_arrays() {
+    // Nullable via type arrays in column extraction (OpenAPI 3.1)
+    let spec =
+        OpenApiSpec::from_str(r#"{"openapi": "3.1.0", "info": {"title": "T"}, "paths": {}}"#)
+            .unwrap();
+
+    let mut properties = HashMap::new();
+    properties.insert(
+        "name".to_string(),
+        crate::spec::Schema {
+            schema_type: Some("string".to_string()),
+            nullable: true, // from type: ["string", "null"]
+            ..Default::default()
+        },
+    );
+    properties.insert(
+        "count".to_string(),
+        crate::spec::Schema {
+            schema_type: Some("integer".to_string()),
+            ..Default::default()
+        },
+    );
+
+    let schema = crate::spec::Schema {
+        schema_type: Some("object".to_string()),
+        properties,
+        required: vec!["name".to_string(), "count".to_string()],
+        ..Default::default()
+    };
+
+    let columns = extract_columns(&schema, &spec, false);
+
+    let name_col = columns.iter().find(|c| c.name == "name").unwrap();
+    // name is required but nullable (from type array) → nullable=true
+    assert!(name_col.nullable);
+    assert_eq!(name_col.pg_type, "text");
+
+    let count_col = columns.iter().find(|c| c.name == "count").unwrap();
+    // count is required and not nullable → nullable=false
+    assert!(!count_col.nullable);
+    assert_eq!(count_col.pg_type, "bigint");
+}
+
+#[test]
+fn test_rowid_selection_no_id_column() {
+    // No 'id' column → picks first non-attrs non-jsonb column as rowid
+    let spec =
+        OpenApiSpec::from_str(r#"{"openapi": "3.0.0", "info": {"title": "T"}, "paths": {}}"#)
+            .unwrap();
+
+    let mut properties = HashMap::new();
+    properties.insert(
+        "name".to_string(),
+        crate::spec::Schema {
+            schema_type: Some("string".to_string()),
+            ..Default::default()
+        },
+    );
+    properties.insert(
+        "metadata".to_string(),
+        crate::spec::Schema {
+            schema_type: Some("object".to_string()),
+            ..Default::default()
+        },
+    );
+
+    let schema = crate::spec::Schema {
+        schema_type: Some("object".to_string()),
+        properties,
+        ..Default::default()
+    };
+
+    let endpoint = crate::spec::EndpointInfo {
+        path: "/things".to_string(),
+        method: "GET".to_string(),
+        response_schema: Some(schema),
+    };
+
+    let table = generate_foreign_table(&endpoint, &spec, "test_server", false);
+    // 'metadata' is jsonb, so 'name' (text) should be the rowid
+    assert!(
+        table.contains("rowid_column 'name'"),
+        "Expected name as rowid: {table}"
+    );
+}
+
+#[test]
+fn test_rowid_selection_all_jsonb() {
+    // All columns are jsonb → omits rowid_column
+    let spec =
+        OpenApiSpec::from_str(r#"{"openapi": "3.0.0", "info": {"title": "T"}, "paths": {}}"#)
+            .unwrap();
+
+    let mut properties = HashMap::new();
+    properties.insert(
+        "data".to_string(),
+        crate::spec::Schema {
+            schema_type: Some("object".to_string()),
+            ..Default::default()
+        },
+    );
+    properties.insert(
+        "meta".to_string(),
+        crate::spec::Schema {
+            schema_type: Some("array".to_string()),
+            ..Default::default()
+        },
+    );
+
+    let schema = crate::spec::Schema {
+        schema_type: Some("object".to_string()),
+        properties,
+        ..Default::default()
+    };
+
+    let endpoint = crate::spec::EndpointInfo {
+        path: "/blobs".to_string(),
+        method: "GET".to_string(),
+        response_schema: Some(schema),
+    };
+
+    let table = generate_foreign_table(&endpoint, &spec, "test_server", false);
+    // All columns are jsonb → no suitable rowid column
+    assert!(
+        !table.contains("rowid_column"),
+        "All-jsonb schema should omit rowid_column: {table}"
+    );
+}
+
+#[test]
+fn test_no_properties_schema_defaults() {
+    // Empty properties (e.g., additionalProperties-only schema) → only attrs column if enabled
+    let spec =
+        OpenApiSpec::from_str(r#"{"openapi": "3.0.0", "info": {"title": "T"}, "paths": {}}"#)
+            .unwrap();
+
+    let schema = crate::spec::Schema {
+        schema_type: Some("object".to_string()),
+        // No properties
+        ..Default::default()
+    };
+
+    let columns_with_attrs = extract_columns(&schema, &spec, true);
+    assert_eq!(columns_with_attrs.len(), 1);
+    assert_eq!(columns_with_attrs[0].name, "attrs");
+
+    let columns_without_attrs = extract_columns(&schema, &spec, false);
+    assert_eq!(columns_without_attrs.len(), 0);
+}
+
+#[test]
+fn test_column_ordering_id_first() {
+    // id sorts first, rest alphabetical
+    let spec =
+        OpenApiSpec::from_str(r#"{"openapi": "3.0.0", "info": {"title": "T"}, "paths": {}}"#)
+            .unwrap();
+
+    let mut properties = HashMap::new();
+    for name in &["zebra", "id", "alpha", "middle"] {
+        properties.insert(
+            name.to_string(),
+            crate::spec::Schema {
+                schema_type: Some("string".to_string()),
+                ..Default::default()
+            },
+        );
+    }
+
+    let schema = crate::spec::Schema {
+        schema_type: Some("object".to_string()),
+        properties,
+        ..Default::default()
+    };
+
+    let columns = extract_columns(&schema, &spec, false);
+    let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, vec!["id", "alpha", "middle", "zebra"]);
+}
+
+#[test]
+fn test_sanitize_consecutive_special_chars() {
+    // @@@id → ___id (each special char becomes _)
+    assert_eq!(sanitize_column_name("@@@id"), "___id");
+}
+
+#[test]
+fn test_sanitize_leading_underscore_preserved() {
+    // _id stays _id (leading underscore preserved)
+    assert_eq!(sanitize_column_name("_id"), "_id");
 }

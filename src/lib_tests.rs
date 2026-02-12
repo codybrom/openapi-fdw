@@ -676,20 +676,21 @@ fn cell_from_json(
     type_oid: TypeOid,
     json_obj: &JsonValue,
 ) -> Result<Option<Cell>, String> {
-    let mut fdw = OpenApiFdw::default();
-    fdw.cached_columns = vec![CachedColumn {
-        name: col_name.to_string(),
-        type_oid: type_oid.clone(),
-        camel_name: to_camel_case(col_name),
-        lower_name: col_name.to_lowercase(),
-        alnum_name: col_name
-            .chars()
-            .filter(|c| c.is_alphanumeric())
-            .collect::<String>()
-            .to_lowercase(),
-    }];
-    // Pre-populate key map with exact match
-    fdw.column_key_map = vec![Some(KeyMatch::Exact)];
+    let fdw = OpenApiFdw {
+        cached_columns: vec![CachedColumn {
+            name: col_name.to_string(),
+            type_oid: type_oid.clone(),
+            camel_name: to_camel_case(col_name),
+            lower_name: col_name.to_lowercase(),
+            alnum_name: col_name
+                .chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect::<String>()
+                .to_lowercase(),
+        }],
+        column_key_map: vec![Some(KeyMatch::Exact)],
+        ..Default::default()
+    };
     fdw.json_to_cell_cached(json_obj, 0)
 }
 
@@ -746,10 +747,10 @@ fn test_json_to_cell_i64() {
 
 #[test]
 fn test_json_to_cell_f32() {
-    let obj = serde_json::json!({"val": 3.14});
+    let obj = serde_json::json!({"val": 2.78});
     let cell = cell_from_json("val", TypeOid::F32, &obj).unwrap();
     if let Some(Cell::F32(v)) = cell {
-        assert!((v - 3.14_f32).abs() < 0.001);
+        assert!((v - 2.78_f32).abs() < 0.001);
     } else {
         panic!("Expected F32");
     }
@@ -757,10 +758,10 @@ fn test_json_to_cell_f32() {
 
 #[test]
 fn test_json_to_cell_f64() {
-    let obj = serde_json::json!({"val": 3.141_592_653_589_793});
+    let obj = serde_json::json!({"val": 1.234_567_890_123});
     let cell = cell_from_json("val", TypeOid::F64, &obj).unwrap();
     if let Some(Cell::F64(v)) = cell {
-        assert!((v - std::f64::consts::PI).abs() < f64::EPSILON);
+        assert!((v - 1.234_567_890_123).abs() < f64::EPSILON);
     } else {
         panic!("Expected F64");
     }
@@ -818,15 +819,17 @@ fn test_json_to_cell_null_returns_none() {
 #[test]
 fn test_json_to_cell_missing_key_returns_none() {
     let obj = serde_json::json!({"other": "value"});
-    let mut fdw = OpenApiFdw::default();
-    fdw.cached_columns = vec![CachedColumn {
-        name: "missing".to_string(),
-        type_oid: TypeOid::String,
-        camel_name: "missing".to_string(),
-        lower_name: "missing".to_string(),
-        alnum_name: "missing".to_string(),
-    }];
-    fdw.column_key_map = vec![None]; // no match found
+    let fdw = OpenApiFdw {
+        cached_columns: vec![CachedColumn {
+            name: "missing".to_string(),
+            type_oid: TypeOid::String,
+            camel_name: "missing".to_string(),
+            lower_name: "missing".to_string(),
+            alnum_name: "missing".to_string(),
+        }],
+        column_key_map: vec![None], // no match found
+        ..Default::default()
+    };
     let cell = fdw.json_to_cell_cached(&obj, 0).unwrap();
     assert!(cell.is_none());
 }
@@ -902,15 +905,17 @@ fn test_json_to_cell_json_array() {
 #[test]
 fn test_json_to_cell_path_param_injection() {
     // When a column is a path param, its value is injected from path_params
-    let mut fdw = OpenApiFdw::default();
-    fdw.cached_columns = vec![CachedColumn {
-        name: "user_id".to_string(),
-        type_oid: TypeOid::String,
-        camel_name: "userId".to_string(),
-        lower_name: "user_id".to_string(),
-        alnum_name: "userid".to_string(),
-    }];
-    fdw.column_key_map = vec![None];
+    let mut fdw = OpenApiFdw {
+        cached_columns: vec![CachedColumn {
+            name: "user_id".to_string(),
+            type_oid: TypeOid::String,
+            camel_name: "userId".to_string(),
+            lower_name: "user_id".to_string(),
+            alnum_name: "userid".to_string(),
+        }],
+        column_key_map: vec![None],
+        ..Default::default()
+    };
     fdw.path_params
         .insert("user_id".to_string(), "42".to_string());
 
@@ -925,15 +930,17 @@ fn test_json_to_cell_path_param_injection() {
 #[test]
 fn test_json_to_cell_path_param_type_coercion() {
     // Path param for an integer column should be coerced
-    let mut fdw = OpenApiFdw::default();
-    fdw.cached_columns = vec![CachedColumn {
-        name: "id".to_string(),
-        type_oid: TypeOid::I64,
-        camel_name: "id".to_string(),
-        lower_name: "id".to_string(),
-        alnum_name: "id".to_string(),
-    }];
-    fdw.column_key_map = vec![None];
+    let mut fdw = OpenApiFdw {
+        cached_columns: vec![CachedColumn {
+            name: "id".to_string(),
+            type_oid: TypeOid::I64,
+            camel_name: "id".to_string(),
+            lower_name: "id".to_string(),
+            alnum_name: "id".to_string(),
+        }],
+        column_key_map: vec![None],
+        ..Default::default()
+    };
     fdw.path_params.insert("id".to_string(), "123".to_string());
 
     let obj = serde_json::json!({});
@@ -944,15 +951,17 @@ fn test_json_to_cell_path_param_type_coercion() {
 #[test]
 fn test_json_to_cell_attrs_column() {
     // The "attrs" column gets the full row as JSON
-    let mut fdw = OpenApiFdw::default();
-    fdw.cached_columns = vec![CachedColumn {
-        name: "attrs".to_string(),
-        type_oid: TypeOid::Json,
-        camel_name: "attrs".to_string(),
-        lower_name: "attrs".to_string(),
-        alnum_name: "attrs".to_string(),
-    }];
-    fdw.column_key_map = vec![None]; // attrs is special-cased, no key match
+    let fdw = OpenApiFdw {
+        cached_columns: vec![CachedColumn {
+            name: "attrs".to_string(),
+            type_oid: TypeOid::Json,
+            camel_name: "attrs".to_string(),
+            lower_name: "attrs".to_string(),
+            alnum_name: "attrs".to_string(),
+        }],
+        column_key_map: vec![None], // attrs is special-cased, no key match
+        ..Default::default()
+    };
 
     let obj = serde_json::json!({"id": 1, "name": "test"});
     let cell = fdw.json_to_cell_cached(&obj, 0).unwrap();
@@ -962,15 +971,17 @@ fn test_json_to_cell_attrs_column() {
 #[test]
 fn test_json_to_cell_fallback_camel_match() {
     // When column_key_map has None (heterogeneous rows), fallback to camelCase match
-    let mut fdw = OpenApiFdw::default();
-    fdw.cached_columns = vec![CachedColumn {
-        name: "first_name".to_string(),
-        type_oid: TypeOid::String,
-        camel_name: "firstName".to_string(),
-        lower_name: "first_name".to_string(),
-        alnum_name: "firstname".to_string(),
-    }];
-    fdw.column_key_map = vec![None]; // force fallback path
+    let fdw = OpenApiFdw {
+        cached_columns: vec![CachedColumn {
+            name: "first_name".to_string(),
+            type_oid: TypeOid::String,
+            camel_name: "firstName".to_string(),
+            lower_name: "first_name".to_string(),
+            alnum_name: "firstname".to_string(),
+        }],
+        column_key_map: vec![None], // force fallback path
+        ..Default::default()
+    };
 
     let obj = serde_json::json!({"firstName": "Alice"});
     let cell = fdw.json_to_cell_cached(&obj, 0).unwrap();
@@ -983,15 +994,17 @@ fn test_json_to_cell_fallback_camel_match() {
 #[test]
 fn test_json_to_cell_fallback_normalized_match() {
     // Fallback to normalized (alnum-only) matching for @-prefixed keys
-    let mut fdw = OpenApiFdw::default();
-    fdw.cached_columns = vec![CachedColumn {
-        name: "_id".to_string(),
-        type_oid: TypeOid::String,
-        camel_name: "Id".to_string(),
-        lower_name: "_id".to_string(),
-        alnum_name: "id".to_string(),
-    }];
-    fdw.column_key_map = vec![None]; // force fallback path
+    let fdw = OpenApiFdw {
+        cached_columns: vec![CachedColumn {
+            name: "_id".to_string(),
+            type_oid: TypeOid::String,
+            camel_name: "Id".to_string(),
+            lower_name: "_id".to_string(),
+            alnum_name: "id".to_string(),
+        }],
+        column_key_map: vec![None], // force fallback path
+        ..Default::default()
+    };
 
     let obj = serde_json::json!({"@id": "urn:test:123"});
     let cell = fdw.json_to_cell_cached(&obj, 0).unwrap();
@@ -999,4 +1012,148 @@ fn test_json_to_cell_fallback_normalized_match() {
         cell_to_string(cell.as_ref().unwrap()),
         Some("urn:test:123".to_string())
     );
+}
+
+// --- Real-world API pattern tests ---
+
+#[test]
+fn test_stripe_list_response() {
+    // Stripe pattern: {object:"list", data:[...], has_more:true}
+    let fdw = fdw_with_response_path(None);
+    let mut resp = serde_json::json!({
+        "object": "list",
+        "data": [
+            {"id": "ch_1", "amount": 2000, "currency": "usd"},
+            {"id": "ch_2", "amount": 5000, "currency": "eur"}
+        ],
+        "has_more": true,
+        "url": "/v1/charges"
+    });
+    let rows = fdw.extract_data(&mut resp).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["id"], "ch_1");
+    assert_eq!(rows[1]["amount"], 5000);
+    // data was taken (ownership), not cloned
+    assert!(resp["data"].is_null());
+}
+
+#[test]
+fn test_github_direct_array() {
+    // GitHub pattern: direct array response + no auto-pagination
+    let fdw = fdw_with_response_path(None);
+    let mut resp = serde_json::json!([
+        {"id": 1, "login": "octocat", "type": "User"},
+        {"id": 2, "login": "hubot", "type": "Bot"}
+    ]);
+    let rows = fdw.extract_data(&mut resp).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["login"], "octocat");
+
+    // Array responses should not trigger auto-pagination
+    let mut pagination_fdw = make_fdw_for_pagination("");
+    let array_resp = serde_json::json!([{"id": 1}, {"id": 2}]);
+    pagination_fdw.handle_pagination(&array_resp);
+    assert_eq!(pagination_fdw.next_cursor, None);
+    assert_eq!(pagination_fdw.next_url, None);
+}
+
+#[test]
+fn test_hal_links_next_href_pagination() {
+    // HAL pattern: _links/next/href pagination path
+    let mut fdw = make_fdw_for_pagination("");
+    let resp = serde_json::json!({
+        "_embedded": {"items": [{"id": 1}]},
+        "_links": {
+            "self": {"href": "https://api.example.com/items?page=1"},
+            "next": {"href": "https://api.example.com/items?page=2"}
+        }
+    });
+    fdw.handle_pagination(&resp);
+    assert_eq!(
+        fdw.next_url,
+        Some("https://api.example.com/items?page=2".to_string())
+    );
+}
+
+#[test]
+fn test_hyphen_case_key_matching() {
+    // REST APIs with hyphen-case keys: "user-id" → normalized match to "user_id"
+    let rows = vec![serde_json::json!({"user-id": "abc", "user-name": "Alice"})];
+    let map = build_key_map(&["user_id", "user_name"], rows, None);
+    // Normalized matching: "userid" matches "userid" (after stripping non-alnum)
+    assert_eq!(
+        map,
+        vec![
+            Some(KeyMatch::CaseInsensitive("user-id".to_string())),
+            Some(KeyMatch::CaseInsensitive("user-name".to_string()))
+        ]
+    );
+}
+
+#[test]
+fn test_screaming_snake_case_matching() {
+    // Legacy APIs with SCREAMING_SNAKE_CASE: "USER_NAME" → case-insensitive match
+    let rows = vec![serde_json::json!({"USER_NAME": "alice", "USER_ID": 42})];
+    let map = build_key_map(&["user_name", "user_id"], rows, None);
+    assert_eq!(
+        map,
+        vec![
+            Some(KeyMatch::CaseInsensitive("USER_NAME".to_string())),
+            Some(KeyMatch::CaseInsensitive("USER_ID".to_string()))
+        ]
+    );
+}
+
+#[test]
+fn test_json_to_cell_typeoid_other() {
+    // TypeOid::Other(n) → Json cell (same as TypeOid::Json)
+    let obj = serde_json::json!({"payload": {"nested": true, "count": 42}});
+    let cell = cell_from_json("payload", TypeOid::Other("custom_type".to_string()), &obj).unwrap();
+    if let Some(Cell::Json(s)) = cell {
+        assert!(s.contains("\"nested\":true"));
+        assert!(s.contains("\"count\":42"));
+    } else {
+        panic!("Expected Json cell for TypeOid::Other");
+    }
+}
+
+#[test]
+fn test_json_to_cell_fallback_case_insensitive() {
+    // column_key_map=None → fallback 4-step matching with case-insensitive step
+    let fdw = OpenApiFdw {
+        cached_columns: vec![CachedColumn {
+            name: "status".to_string(),
+            type_oid: TypeOid::String,
+            camel_name: "status".to_string(),
+            lower_name: "status".to_string(),
+            alnum_name: "status".to_string(),
+        }],
+        column_key_map: vec![None], // force fallback path
+        ..Default::default()
+    };
+
+    let obj = serde_json::json!({"Status": "active"});
+    let cell = fdw.json_to_cell_cached(&obj, 0).unwrap();
+    assert_eq!(
+        cell_to_string(cell.as_ref().unwrap()),
+        Some("active".to_string())
+    );
+}
+
+#[test]
+fn test_meta_pagination_has_more_nested() {
+    // Paginated APIs: /meta/pagination/has_more + /meta/pagination/next_cursor
+    let mut fdw = make_fdw_for_pagination("");
+    let resp = serde_json::json!({
+        "meta": {
+            "pagination": {
+                "has_more": true,
+                "next_cursor": "cursor_abc123"
+            }
+        },
+        "data": [{"id": 1}, {"id": 2}]
+    });
+    fdw.handle_pagination(&resp);
+    assert_eq!(fdw.next_cursor, Some("cursor_abc123".to_string()));
+    assert_eq!(fdw.next_url, None);
 }
