@@ -1,6 +1,6 @@
 services:
   mockserver:
-    image: mockserver/mockserver:latest
+    image: mockserver/mockserver:mockserver-5.15.0
     ports:
       - "1080:1080"
     environment:
@@ -14,10 +14,10 @@ services:
     ports:
       - "54322:5432"
     environment:
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
     volumes:
-      - ./setup-role.sql:/docker-entrypoint-initdb.d/00-setup-role.sql:ro
       - ./init.sql:/docker-entrypoint-initdb.d/99-init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U supabase_admin"]

@@ -236,11 +236,11 @@ cargo test
 
 ## Changelog
 
-| Version | Date       | Notes                                                       |
-| ------- | ---------- | ----------------------------------------------------------- |
-| 0.2.0   | 2026-02-10 | POST-for-read, OpenAPI 3.1 type arrays, new PG types, cached columns, integration tests |
-| 0.1.4   | 2026-02-09 | Type coercion, auth validation, table naming, URL fixes, include_attrs option |
-| 0.1.3   | 2026-02-07 | Perf: avoid cloning JSON response data during row extraction |
-| 0.1.2   | 2026-02-06 | Fix: prefer WHERE clause value for query/path param columns |
-| 0.1.1   | 2026-02-06 | Fix: inject query param values back into result rows        |
-| 0.1.0   | 2026-01-25 | Initial version                                             |
+| Version | Date       | Notes                                                                                         |
+| ------- | ---------- | --------------------------------------------------------------------------------------------- |
+| 0.2.0   | 2026-02-10 | POST-for-read, OpenAPI 3.1 type arrays, new PG types, cached columns, integration tests       |
+| 0.1.4   | 2026-02-09 | Type coercion, auth validation, table naming, URL fixes, include_attrs option                 |
+| 0.1.3   | 2026-02-07 | Perf: avoid cloning JSON response data during row extraction                                  |
+| 0.1.2   | 2026-02-06 | Fix: prefer WHERE clause value for query/path param columns                                   |
+| 0.1.1   | 2026-02-06 | Fix: inject query param values back into result rows                                          |
+| 0.1.0   | 2026-01-25 | Initial version                                                                               |

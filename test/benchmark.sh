@@ -22,7 +22,7 @@ PGNET_AVAILABLE=false
 
 # All psql calls set search_path first via separate -c flag
 psql_cmd() {
-  docker compose -f "$COMPOSE_FILE" exec -T -e PGPASSWORD=postgres db \
+  docker compose -f "$COMPOSE_FILE" exec -T -e PGPASSWORD="${POSTGRES_PASSWORD:-postgres}" db \
     psql -U postgres -P pager=off \
     -c "SET search_path TO public, extensions, net;" \
     "$@" 2>&1 | sed '/^SET$/d'

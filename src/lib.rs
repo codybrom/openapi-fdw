@@ -407,7 +407,8 @@ impl OpenApiFdw {
         }
 
         if !params.is_empty() {
-            base.push('?');
+            let separator = if base.contains('?') { '&' } else { '?' };
+            base.push(separator);
             base.push_str(&params.join("&"));
         }
 

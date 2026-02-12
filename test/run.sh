@@ -10,7 +10,7 @@ PASS=0
 FAIL=0
 
 psql_cmd() {
-  docker compose -f test/docker-compose.yml exec -T -e PGPASSWORD=postgres db psql -U postgres -P pager=off "$@"
+  docker compose -f test/docker-compose.yml exec -T -e PGPASSWORD="${POSTGRES_PASSWORD:-postgres}" db psql -U postgres -P pager=off "$@"
 }
 
 # Run a query, check output contains expected substring
