@@ -12,6 +12,7 @@ mod schema;
 mod spec;
 
 use serde_json::{Map as JsonMap, Value as JsonValue};
+use std::borrow::Cow;
 
 use bindings::{
     exports::supabase::wrappers::routines::Guest,
@@ -266,8 +267,9 @@ impl OpenApiFdw {
         }
 
         // Build a map of qual field -> value for path parameter substitution
+        // Pre-allocate for 2 entries per qual (original + lowercase key)
         let mut qual_map: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
+            std::collections::HashMap::with_capacity(quals.len() * 2);
         for qual in quals {
             if let Some(value) = Self::qual_value_to_string(qual) {
                 // Store both original and lowercase versions for flexible matching
@@ -336,7 +338,8 @@ impl OpenApiFdw {
         quals: &[bindings::supabase::wrappers::types::Qual],
         path_params_used: &[String],
     ) -> Vec<String> {
-        let mut params = Vec::new();
+        // Pre-allocate for cursor + page_size + quals + api_key
+        let mut params = Vec::with_capacity(quals.len() + 3);
 
         // Add pagination cursor if we have one
         if let Some(ref cursor) = self.next_cursor {
@@ -655,13 +658,15 @@ impl OpenApiFdw {
     /// OpenAPI `format: "date"` produces `"2024-01-15"` (RFC 3339 `full-date`),
     /// but `time::parse_from_rfc3339` requires a full datetime. This appends
     /// `T00:00:00Z` to date-only strings so they parse correctly.
-    fn normalize_datetime(s: &str) -> String {
+    ///
+    /// Returns `Cow<str>` to avoid allocating when the string is already valid.
+    fn normalize_datetime(s: &str) -> Cow<str> {
         // Date-only: exactly 10 chars matching YYYY-MM-DD pattern
         if s.len() == 10 && s.as_bytes().get(4) == Some(&b'-') && s.as_bytes().get(7) == Some(&b'-')
         {
-            format!("{s}T00:00:00Z")
+            Cow::Owned(format!("{s}T00:00:00Z"))
         } else {
-            s.to_string()
+            Cow::Borrowed(s)
         }
     }
 
