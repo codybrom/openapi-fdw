@@ -1,4 +1,5 @@
 use super::*;
+use crate::bindings::supabase::wrappers::types::TypeOid;
 
 // --- json_to_rows tests ---
 
