@@ -601,7 +601,7 @@ fn test_debug_redacts_headers() {
         .headers
         .push(("x-api-key".to_string(), "my-secret-key".to_string()));
 
-    let debug_output = format!("{:?}", config);
+    let debug_output = format!("{config:?}");
     assert!(!debug_output.contains("secret-token"));
     assert!(!debug_output.contains("my-secret-key"));
     assert!(debug_output.contains("[2 header(s)]"));
@@ -609,10 +609,12 @@ fn test_debug_redacts_headers() {
 
 #[test]
 fn test_debug_redacts_api_key_query() {
-    let mut config = ServerConfig::default();
-    config.api_key_query = Some(("api_key".to_string(), "super-secret".to_string()));
+    let config = ServerConfig {
+        api_key_query: Some(("api_key".to_string(), "super-secret".to_string())),
+        ..Default::default()
+    };
 
-    let debug_output = format!("{:?}", config);
+    let debug_output = format!("{config:?}");
     assert!(!debug_output.contains("super-secret"));
     assert!(debug_output.contains("api_key=[REDACTED]"));
 }
@@ -626,7 +628,7 @@ fn test_debug_shows_non_sensitive_fields() {
         ..Default::default()
     };
 
-    let debug_output = format!("{:?}", config);
+    let debug_output = format!("{config:?}");
     assert!(debug_output.contains("https://api.example.com"));
     assert!(debug_output.contains("500"));
     assert!(debug_output.contains("true"));
@@ -635,7 +637,7 @@ fn test_debug_shows_non_sensitive_fields() {
 #[test]
 fn test_debug_no_api_key_query_shows_none() {
     let config = ServerConfig::default();
-    let debug_output = format!("{:?}", config);
+    let debug_output = format!("{config:?}");
     assert!(debug_output.contains("api_key_query: None"));
 }
 
