@@ -14,23 +14,23 @@ use crate::{FDW_NAME, OpenApiFdw};
 impl OpenApiFdw {
     /// Fetch and parse the `OpenAPI` spec
     pub(crate) fn fetch_spec(&mut self) -> Result<(), FdwError> {
-        if let Some(ref url) = self.spec_url {
+        if let Some(ref url) = self.config.spec_url {
             let req = http::Request {
                 method: http::Method::Get,
                 url: url.clone(),
-                headers: self.headers.clone(),
+                headers: self.config.headers.clone(),
                 body: String::default(),
             };
             let resp = http::get(&req)?;
             http::error_for_status(&resp)
                 .map_err(|err| format!("Failed to fetch OpenAPI spec: {}: {}", err, resp.body))?;
 
-            if resp.body.len() > self.max_response_bytes {
+            if resp.body.len() > self.config.max_response_bytes {
                 return Err(format!(
                     "OpenAPI spec too large: {} bytes (limit: {} bytes). \
                      Increase max_response_bytes server option if needed.",
                     resp.body.len(),
-                    self.max_response_bytes
+                    self.config.max_response_bytes
                 ));
             }
 
@@ -39,9 +39,9 @@ impl OpenApiFdw {
             let spec = OpenApiSpec::from_json(spec_json)?;
 
             // Use base_url from spec if not explicitly set
-            if self.base_url.is_empty() {
+            if self.config.base_url.is_empty() {
                 if let Some(url) = spec.base_url() {
-                    self.base_url = url.trim_end_matches('/').to_string();
+                    self.config.base_url = url.trim_end_matches('/').to_string();
                 }
             }
 
@@ -85,11 +85,11 @@ impl OpenApiFdw {
             next_url.to_string()
         } else if next_url.starts_with('?') {
             let endpoint_base = self.endpoint.split('?').next().unwrap_or(&self.endpoint);
-            format!("{}{endpoint_base}{next_url}", self.base_url)
+            format!("{}{endpoint_base}{next_url}", self.config.base_url)
         } else if next_url.starts_with('/') {
-            format!("{}{next_url}", self.base_url)
+            format!("{}{next_url}", self.config.base_url)
         } else {
-            format!("{}/{next_url}", self.base_url)
+            format!("{}/{next_url}", self.config.base_url)
         }
     }
 
@@ -193,14 +193,17 @@ impl OpenApiFdw {
         if let Some(ref cursor) = self.pagination.next_cursor {
             params.push(format!(
                 "{}={}",
-                self.cursor_param,
+                self.config.cursor_param,
                 urlencoding::encode(cursor)
             ));
         }
 
         // Add page size if configured
-        if self.page_size > 0 && !self.page_size_param.is_empty() {
-            params.push(format!("{}={}", self.page_size_param, self.page_size));
+        if self.config.page_size > 0 && !self.config.page_size_param.is_empty() {
+            params.push(format!(
+                "{}={}",
+                self.config.page_size_param, self.config.page_size
+            ));
         }
 
         // Add remaining quals as query params (exclude path params and rowid)
@@ -230,7 +233,7 @@ impl OpenApiFdw {
         }
 
         // Add API key as query parameter if configured
-        if let Some((ref param_name, ref param_value)) = self.api_key_query {
+        if let Some((ref param_name, ref param_value)) = self.config.api_key_query {
             params.push(format!(
                 "{}={}",
                 urlencoding::encode(param_name),
@@ -278,7 +281,7 @@ impl OpenApiFdw {
                         .insert(self.rowid_col.clone(), id.clone());
                     return Ok(format!(
                         "{}{}/{}",
-                        self.base_url,
+                        self.config.base_url,
                         endpoint,
                         urlencoding::encode(&id)
                     ));
@@ -291,7 +294,7 @@ impl OpenApiFdw {
         self.injected_params.extend(injected_entries);
 
         // Assemble final URL
-        let mut url = format!("{}{}", self.base_url, endpoint);
+        let mut url = format!("{}{}", self.config.base_url, endpoint);
         if !params.is_empty() {
             let separator = if url.contains('?') { '&' } else { '?' };
             url.push(separator);
@@ -308,7 +311,7 @@ impl OpenApiFdw {
         let req = http::Request {
             method: self.method,
             url,
-            headers: self.headers.clone(),
+            headers: self.config.headers.clone(),
             body: self.request_body.clone(),
         };
 
@@ -354,7 +357,7 @@ impl OpenApiFdw {
             break resp;
         };
 
-        if self.debug_timing {
+        if self.config.debug_timing {
             crate::bindings::supabase::wrappers::utils::report_info(&format!(
                 "[openapi_fdw] HTTP {} {} -> {} ({} bytes)",
                 if matches!(req.method, http::Method::Post) {
@@ -378,12 +381,12 @@ impl OpenApiFdw {
 
         http::error_for_status(&resp).map_err(|err| format!("{}: {}", err, resp.body))?;
 
-        if resp.body.len() > self.max_response_bytes {
+        if resp.body.len() > self.config.max_response_bytes {
             return Err(format!(
                 "Response body too large: {} bytes (limit: {} bytes). \
                  Increase max_response_bytes server option if needed.",
                 resp.body.len(),
-                self.max_response_bytes
+                self.config.max_response_bytes
             ));
         }
 

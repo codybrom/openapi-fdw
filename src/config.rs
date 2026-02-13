@@ -2,13 +2,50 @@
 
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
-use crate::OpenApiFdw;
 use crate::bindings::supabase::wrappers::{
     types::{FdwResult, Options},
     utils,
 };
 
-impl OpenApiFdw {
+/// Immutable server-level configuration.
+///
+/// Fields are set once in `init()` from server options and remain constant
+/// for the FDW lifetime. A few fields (`page_size`, `page_size_param`,
+/// `cursor_param`) can be overridden per-table in `begin_scan`.
+#[derive(Debug)]
+pub(crate) struct ServerConfig {
+    pub(crate) base_url: String,
+    pub(crate) headers: Vec<(String, String)>,
+    pub(crate) spec_url: Option<String>,
+    pub(crate) api_key_query: Option<(String, String)>,
+    pub(crate) include_attrs: bool,
+    pub(crate) page_size: usize,
+    pub(crate) page_size_param: String,
+    pub(crate) cursor_param: String,
+    pub(crate) max_pages: usize,
+    pub(crate) max_response_bytes: usize,
+    pub(crate) debug_timing: bool,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            base_url: String::new(),
+            headers: Vec::new(),
+            spec_url: None,
+            api_key_query: None,
+            include_attrs: false,
+            page_size: 0,
+            page_size_param: String::new(),
+            cursor_param: String::new(),
+            max_pages: 1000,
+            max_response_bytes: 50 * 1024 * 1024, // 50 MiB
+            debug_timing: false,
+        }
+    }
+}
+
+impl ServerConfig {
     /// Configure request headers from server options
     pub(crate) fn configure_headers(&mut self, opts: &Options) -> FdwResult {
         self.headers

@@ -32,6 +32,7 @@ use bindings::{
 };
 
 use column_matching::{CachedColumn, KeyMatch, normalize_to_alnum, to_camel_case};
+use config::ServerConfig;
 use pagination::PaginationState;
 use schema::generate_all_tables;
 use spec::OpenApiSpec;
@@ -39,11 +40,11 @@ use spec::OpenApiSpec;
 /// The `OpenAPI` FDW state
 #[derive(Debug)]
 struct OpenApiFdw {
-    // Configuration from server options
-    base_url: String,
-    headers: Vec<(String, String)>,
+    // Server-level configuration (set once in init, some overridden per table)
+    config: ServerConfig,
+
+    // OpenAPI spec (fetched on demand)
     spec: Option<OpenApiSpec>,
-    spec_url: Option<String>,
 
     // Current operation state (from table options)
     method: http::Method,
@@ -52,22 +53,10 @@ struct OpenApiFdw {
     response_path: Option<String>,
     object_path: Option<String>, // Extract nested object from each row (e.g., "/properties" for GeoJSON)
     rowid_col: String,
-
-    // Pagination configuration
-    cursor_param: String,
     cursor_path: String,
-    page_size: usize,
-    page_size_param: String,
 
     // Pagination state and loop detection
     pagination: PaginationState,
-    max_pages: usize,
-
-    // API key as query parameter (when api_key_location = 'query')
-    api_key_query: Option<(String, String)>,
-
-    // Schema generation options
-    include_attrs: bool,
 
     // Qual values injected as URL path/query params (for injecting back into rows)
     injected_params: HashMap<String, String>,
@@ -85,35 +74,23 @@ struct OpenApiFdw {
     src_limit: Option<i64>,
     consumed_row_cnt: i64,
 
-    // Safety limits
-    max_response_bytes: usize,
-
-    // Debug logging (enabled via server option debug_timing = 'true')
-    debug_timing: bool,
+    // Debug row counter (only active when config.debug_timing is true)
     scan_row_count: i64,
 }
 
 impl Default for OpenApiFdw {
     fn default() -> Self {
         Self {
-            base_url: String::new(),
-            headers: Vec::new(),
+            config: ServerConfig::default(),
             spec: None,
-            spec_url: None,
             method: http::Method::Get,
             request_body: String::new(),
             endpoint: String::new(),
             response_path: None,
             object_path: None,
             rowid_col: String::new(),
-            cursor_param: String::new(),
             cursor_path: String::new(),
-            page_size: 0,
-            page_size_param: String::new(),
             pagination: PaginationState::default(),
-            max_pages: 1000,
-            api_key_query: None,
-            include_attrs: false,
             injected_params: HashMap::new(),
             src_rows: Vec::new(),
             src_idx: 0,
@@ -121,8 +98,6 @@ impl Default for OpenApiFdw {
             column_key_map: Vec::new(),
             src_limit: None,
             consumed_row_cnt: 0,
-            max_response_bytes: 50 * 1024 * 1024, // 50 MiB
-            debug_timing: false,
             scan_row_count: 0,
         }
     }
@@ -173,34 +148,34 @@ impl Guest for OpenApiFdw {
         let opts = ctx.get_options(&OptionsType::Server);
 
         // Get base_url (optional if spec_url provides servers)
-        this.base_url = opts
+        this.config.base_url = opts
             .get("base_url")
             .unwrap_or_default()
             .trim_end_matches('/')
             .to_string();
 
         // Validate base_url format if provided
-        if !this.base_url.is_empty()
-            && !this.base_url.starts_with("http://")
-            && !this.base_url.starts_with("https://")
+        if !this.config.base_url.is_empty()
+            && !this.config.base_url.starts_with("http://")
+            && !this.config.base_url.starts_with("https://")
         {
             return Err(format!(
                 "Invalid base_url: '{}'. Must start with http:// or https://",
-                this.base_url
+                this.config.base_url
             ));
         }
 
         // Get spec_url for import_foreign_schema
-        this.spec_url = opts.get("spec_url");
+        this.config.spec_url = opts.get("spec_url");
 
         // Whether to include an 'attrs' jsonb column in IMPORT FOREIGN SCHEMA output
-        this.include_attrs = opts
+        this.config.include_attrs = opts
             .get("include_attrs")
             .map(|v| v != "false")
             .unwrap_or(true);
 
         // Validate spec_url format if provided
-        if let Some(ref spec_url) = this.spec_url {
+        if let Some(ref spec_url) = this.config.spec_url {
             if !spec_url.starts_with("http://") && !spec_url.starts_with("https://") {
                 return Err(format!(
                     "Invalid spec_url: '{spec_url}'. Must start with http:// or https://"
@@ -208,36 +183,36 @@ impl Guest for OpenApiFdw {
             }
         }
 
-        this.configure_headers(&opts)?;
-        this.configure_auth(&opts)?;
+        this.config.configure_headers(&opts)?;
+        this.config.configure_auth(&opts)?;
 
         // Pagination defaults (page_size=0 means no automatic limit parameter)
-        this.page_size = match opts.get("page_size") {
+        this.config.page_size = match opts.get("page_size") {
             Some(s) => s
                 .parse()
                 .map_err(|_| format!("Invalid value for 'page_size': '{s}'"))?,
             None => 0,
         };
 
-        this.page_size_param = opts.require_or("page_size_param", "limit");
-        this.cursor_param = opts.require_or("cursor_param", "after");
+        this.config.page_size_param = opts.require_or("page_size_param", "limit");
+        this.config.cursor_param = opts.require_or("cursor_param", "after");
 
         // Maximum pages per scan (default 1000, prevents infinite pagination loops)
         if let Some(s) = opts.get("max_pages") {
-            this.max_pages = s
+            this.config.max_pages = s
                 .parse()
                 .map_err(|_| format!("Invalid value for 'max_pages': '{s}'"))?;
         }
 
         // Maximum response body size (default 50 MiB)
         if let Some(s) = opts.get("max_response_bytes") {
-            this.max_response_bytes = s
+            this.config.max_response_bytes = s
                 .parse()
                 .map_err(|_| format!("Invalid value for 'max_response_bytes': '{s}'"))?;
         }
 
         // Debug timing: emit per-scan timing via NOTICE when enabled
-        this.debug_timing = opts
+        this.config.debug_timing = opts
             .get("debug_timing")
             .is_some_and(|v| v == "true" || v == "1");
 
@@ -268,17 +243,17 @@ impl Guest for OpenApiFdw {
 
         // Override pagination params if specified at table level
         if let Some(param) = opts.get("cursor_param") {
-            this.cursor_param = param;
+            this.config.cursor_param = param;
         }
         if let Some(param) = opts.get("page_size_param") {
-            this.page_size_param = param;
+            this.config.page_size_param = param;
         }
         if let Some(size) = opts.get("page_size") {
             match size.parse() {
-                Ok(parsed) => this.page_size = parsed,
+                Ok(parsed) => this.config.page_size = parsed,
                 Err(e) => utils::report_warning(&format!(
                     "Invalid page_size '{}': {}. Using default value {}.",
-                    size, e, this.page_size
+                    size, e, this.config.page_size
                 )),
             }
         }
@@ -311,7 +286,7 @@ impl Guest for OpenApiFdw {
             })
             .collect();
 
-        if this.debug_timing {
+        if this.config.debug_timing {
             this.scan_row_count = 0;
         }
 
@@ -343,11 +318,11 @@ impl Guest for OpenApiFdw {
             }
 
             // Pagination safety: detect loops and enforce page limit
-            if this.pagination.exceeds_limit(this.max_pages) {
+            if this.pagination.exceeds_limit(this.config.max_pages) {
                 utils::report_warning(&format!(
                     "Pagination stopped after {} pages (max_pages limit). \
                      Increase max_pages server option if needed.",
-                    this.max_pages
+                    this.config.max_pages
                 ));
                 return Ok(None);
             }
@@ -379,7 +354,7 @@ impl Guest for OpenApiFdw {
 
         this.src_idx += 1;
         this.consumed_row_cnt += 1;
-        if this.debug_timing {
+        if this.config.debug_timing {
             this.scan_row_count += 1;
         }
 
@@ -396,7 +371,7 @@ impl Guest for OpenApiFdw {
     fn end_scan(_ctx: &Context) -> FdwResult {
         let this = Self::this_mut();
 
-        if this.debug_timing {
+        if this.config.debug_timing {
             utils::report_info(&format!(
                 "[openapi_fdw] Scan complete: {} rows, {} columns",
                 this.scan_row_count,
@@ -454,8 +429,13 @@ impl Guest for OpenApiFdw {
             ImportSchemaType::Except => (Some(stmt.table_list.as_slice()), true),
         };
 
-        let tables =
-            generate_all_tables(spec, &stmt.server_name, filter, exclude, this.include_attrs);
+        let tables = generate_all_tables(
+            spec,
+            &stmt.server_name,
+            filter,
+            exclude,
+            this.config.include_attrs,
+        );
 
         Ok(tables)
     }

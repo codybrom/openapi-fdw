@@ -300,7 +300,10 @@ fn test_build_column_key_map_with_object_path() {
 fn make_fdw_for_pagination(cursor_path: &str) -> OpenApiFdw {
     OpenApiFdw {
         cursor_path: cursor_path.to_string(),
-        cursor_param: "after".to_string(),
+        config: ServerConfig {
+            cursor_param: "after".to_string(),
+            ..Default::default()
+        },
         ..Default::default()
     }
 }
@@ -650,7 +653,10 @@ fn test_to_camel_case_single_char() {
 
 fn make_fdw_for_url(base_url: &str, endpoint: &str) -> OpenApiFdw {
     OpenApiFdw {
-        base_url: base_url.to_string(),
+        config: ServerConfig {
+            base_url: base_url.to_string(),
+            ..Default::default()
+        },
         endpoint: endpoint.to_string(),
         ..Default::default()
     }
@@ -1898,7 +1904,7 @@ fn test_retry_backoff_cap() {
 #[test]
 fn test_max_response_bytes_default() {
     let fdw = OpenApiFdw::default();
-    assert_eq!(fdw.max_response_bytes, 50 * 1024 * 1024); // 50 MiB
+    assert_eq!(fdw.config.max_response_bytes, 50 * 1024 * 1024); // 50 MiB
 }
 
 // --- Error message context tests ---
@@ -1935,7 +1941,7 @@ fn test_json_to_rows_error_shows_type() {
 #[test]
 fn test_pagination_safety_defaults() {
     let fdw = OpenApiFdw::default();
-    assert_eq!(fdw.max_pages, 1000);
+    assert_eq!(fdw.config.max_pages, 1000);
     assert_eq!(fdw.pagination.pages_fetched, 0);
     assert_eq!(fdw.pagination.prev_cursor, None);
     assert_eq!(fdw.pagination.prev_url, None);
