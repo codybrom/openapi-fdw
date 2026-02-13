@@ -264,14 +264,14 @@ impl OpenApiSpec {
         endpoints
     }
 
+    /// Success response codes to check, in priority order
+    const SUCCESS_RESPONSE_CODES: &[&str] = &["200", "201", "2XX", "default"];
+
     /// Get the response schema for a successful response (200, 201, 2XX, or default)
     fn get_response_schema(&self, op: &Operation) -> Option<Schema> {
-        let response = op
-            .responses
-            .get("200")
-            .or_else(|| op.responses.get("201"))
-            .or_else(|| op.responses.get("2XX"))
-            .or_else(|| op.responses.get("default"))?;
+        let response = Self::SUCCESS_RESPONSE_CODES
+            .iter()
+            .find_map(|code| op.responses.get(*code))?;
 
         // Resolve $ref at the response level (e.g., "$ref": "#/components/responses/Success")
         let resolved_response = response

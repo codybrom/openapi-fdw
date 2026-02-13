@@ -80,17 +80,19 @@ pub fn extract_columns(schema: &Schema, spec: &OpenApiSpec, include_attrs: bool)
                 }
                 let pg_type = openapi_to_pg_type(prop_schema, spec);
                 let nullable = !schema.required.contains(name) || prop_schema.nullable;
-                let mut col_name = sanitize_column_name(name);
+                let base_name = sanitize_column_name(name);
 
                 // Deduplicate: if this sanitized name was already used, append a suffix
-                let count = seen.entry(col_name.clone()).or_insert(0);
-                if *count > 0 {
-                    col_name = format!("{col_name}_{count}");
-                }
+                let count = seen.entry(base_name.clone()).or_insert(0);
+                let final_name = if *count > 0 {
+                    format!("{base_name}_{count}")
+                } else {
+                    base_name
+                };
                 *count += 1;
 
                 columns.push(ColumnDef {
-                    name: col_name,
+                    name: final_name,
                     pg_type,
                     nullable,
                 });

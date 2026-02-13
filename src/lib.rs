@@ -13,6 +13,7 @@ mod spec;
 
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 use bindings::{
     exports::supabase::wrappers::routines::Guest,
@@ -93,7 +94,7 @@ struct OpenApiFdw {
     include_attrs: bool,
 
     // Qual values injected as URL path/query params (for injecting back into rows)
-    injected_params: std::collections::HashMap<String, String>,
+    injected_params: HashMap<String, String>,
 
     // Data buffers
     src_rows: Vec<JsonValue>,
@@ -134,7 +135,7 @@ impl Default for OpenApiFdw {
             next_url: None,
             api_key_query: None,
             include_attrs: false,
-            injected_params: std::collections::HashMap::new(),
+            injected_params: HashMap::new(),
             src_rows: Vec::new(),
             src_idx: 0,
             cached_columns: Vec::new(),
@@ -262,7 +263,7 @@ impl OpenApiFdw {
     fn substitute_path_params(
         endpoint: &str,
         quals: &[bindings::supabase::wrappers::types::Qual],
-        injected: &mut std::collections::HashMap<String, String>,
+        injected: &mut HashMap<String, String>,
     ) -> Result<(String, Vec<String>), String> {
         if !endpoint.contains('{') {
             return Ok((endpoint.to_string(), Vec::new()));
@@ -270,8 +271,7 @@ impl OpenApiFdw {
 
         // Build a map of qual field -> value for path parameter substitution
         // Pre-allocate for 2 entries per qual (original + lowercase key)
-        let mut qual_map: std::collections::HashMap<String, String> =
-            std::collections::HashMap::with_capacity(quals.len() * 2);
+        let mut qual_map: HashMap<String, String> = HashMap::with_capacity(quals.len() * 2);
         for qual in quals {
             if let Some(value) = Self::qual_value_to_string(qual) {
                 // Store both original and lowercase versions for flexible matching
@@ -1187,7 +1187,7 @@ impl Guest for OpenApiFdw {
             .object_path
             .as_ref()
             .map_or(src_row, |path| src_row.pointer(path).unwrap_or(src_row));
-        for col_idx in 0..this.cached_columns.len() {
+        for (col_idx, _) in this.cached_columns.iter().enumerate() {
             let cell = this.json_to_cell_cached(effective_row, col_idx)?;
             row.push(cell.as_ref());
         }
