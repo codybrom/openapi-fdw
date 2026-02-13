@@ -9,7 +9,7 @@ This document captures performance characteristics, optimizations, and benchmark
 ### End-to-End Performance (10 iterations each)
 
 | Scenario | OpenAPI FDW | pg_http | pg_net | Overhead |
-|----------|-------------|---------|--------|----------|
+| ---------- | ------------- | --------- | -------- | ---------- |
 | Simple Array (3 rows) | 183ms | 10ms | 786ms | +173ms |
 | Wrapped Response (2 rows) | 178ms | 7ms | 787ms | +171ms |
 | Type Coercion (1 row) | 185ms | 10ms | 792ms | +175ms |
@@ -23,7 +23,7 @@ This document captures performance characteristics, optimizations, and benchmark
 From Criterion benchmarks (`cargo bench --bench fdw_benchmarks`):
 
 | Operation | Time | Notes |
-|-----------|------|-------|
+| ----------- | ------ | ------- |
 | Column sanitization (camelCase→snake_case) | 60-122ns | One-time per column |
 | camelCase conversion | 19-123ns | Cached in begin_scan |
 | JSON key lookup (HashMap) | 12-16ns | O(1) exact match |
@@ -83,7 +83,7 @@ Once initialized, per-row costs are minimal:
 Most REST APIs have 100-500ms base latency. Example:
 
 | API Latency | pg_http Total | OpenAPI FDW Total | Relative Overhead |
-|-------------|---------------|-------------------|-------------------|
+| ------------- | --------------- | ------------------- | ------------------- |
 | 100ms | 110ms | 280ms | +154% |
 | 200ms | 210ms | 380ms | +81% |
 | 300ms | 310ms | 480ms | +55% |
@@ -113,7 +113,7 @@ Despite the overhead, OpenAPI FDW provides value when:
    - Changed `from_json(&JsonValue)` to `from_json(JsonValue)`
    - Eliminates clone of entire OpenAPI spec
 
-3. **Cow<str> for datetime normalization**
+3. **`Cow<str>` for datetime normalization**
    - **13× faster** for already-valid datetimes (0.98ns vs 13ns)
    - Eliminates 50% of allocations in date/timestamp columns
 
@@ -142,7 +142,7 @@ Despite the overhead, OpenAPI FDW provides value when:
 **Root cause:** Supabase Wrappers recreates the entire wasmtime stack for every query in `wasm_fdw.rs:new()`:
 
 | Step | Cached? | Est. Cost |
-|------|---------|-----------|
+| ------ | --------- | ----------- |
 | Engine creation | No | ~20-30ms |
 | Component load (from disk) | Yes (file only) | ~10-20ms |
 | WASM → native compilation | No | ~40-60ms |
