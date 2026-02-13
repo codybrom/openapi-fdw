@@ -290,25 +290,27 @@ impl OpenApiSpec {
         media_type.schema.clone()
     }
 
+    /// Parse a `#/components/{section}/{name}` reference, returning the name if it matches.
+    fn parse_component_ref<'a>(reference: &'a str, section: &str) -> Option<&'a str> {
+        let path = reference.strip_prefix("#/components/")?;
+        let name = path.strip_prefix(section)?.strip_prefix('/')?;
+        // Reject if name contains further slashes (e.g., "#/components/schemas/a/b")
+        if name.contains('/') {
+            return None;
+        }
+        Some(name)
+    }
+
     /// Resolve a $ref to a response in components.responses
     fn resolve_response_ref(&self, reference: &str) -> Option<&Response> {
-        let parts: Vec<&str> = reference.trim_start_matches("#/").split('/').collect();
-        if parts.len() == 3 && parts[0] == "components" && parts[1] == "responses" {
-            self.components.as_ref()?.responses.get(parts[2])
-        } else {
-            None
-        }
+        let name = Self::parse_component_ref(reference, "responses")?;
+        self.components.as_ref()?.responses.get(name)
     }
 
     /// Resolve a $ref to its schema
     pub fn resolve_ref(&self, reference: &str) -> Option<&Schema> {
-        // Handle refs like "#/components/schemas/User"
-        let parts: Vec<&str> = reference.trim_start_matches("#/").split('/').collect();
-        if parts.len() == 3 && parts[0] == "components" && parts[1] == "schemas" {
-            self.components.as_ref()?.schemas.get(parts[2])
-        } else {
-            None
-        }
+        let name = Self::parse_component_ref(reference, "schemas")?;
+        self.components.as_ref()?.schemas.get(name)
     }
 
     /// Recursively resolve a schema, following $ref pointers and handling composition.
@@ -352,30 +354,24 @@ impl OpenApiSpec {
 
         // Handle allOf by merging all properties (intersection - all schemas apply)
         if !schema.all_of.is_empty() {
-            return self.merge_schemas_with_depth(&schema.all_of, false, depth + 1);
+            return self.merge_allof_schemas(&schema.all_of, depth + 1);
         }
 
         // Handle oneOf by merging all possible properties as nullable (union - one of the schemas)
         if !schema.one_of.is_empty() {
-            return self.merge_schemas_with_depth(&schema.one_of, true, depth + 1);
+            return self.merge_union_schemas(&schema.one_of, depth + 1);
         }
 
         // Handle anyOf by merging all possible properties as nullable (union - any of the schemas)
         if !schema.any_of.is_empty() {
-            return self.merge_schemas_with_depth(&schema.any_of, true, depth + 1);
+            return self.merge_union_schemas(&schema.any_of, depth + 1);
         }
 
         schema.clone()
     }
 
-    /// Merge multiple schemas into one with depth tracking.
-    /// If `make_nullable` is true, all properties become optional (for oneOf/anyOf)
-    fn merge_schemas_with_depth(
-        &self,
-        schemas: &[Schema],
-        make_nullable: bool,
-        depth: usize,
-    ) -> Schema {
+    /// Merge allOf schemas: later schemas refine/override earlier ones, required fields preserved.
+    fn merge_allof_schemas(&self, schemas: &[Schema], depth: usize) -> Schema {
         let mut merged = Schema {
             properties: HashMap::new(),
             required: Vec::new(),
@@ -391,25 +387,48 @@ impl OpenApiSpec {
                 has_any_properties = true;
             }
 
-            // Merge properties
-            for (name, mut prop_schema) in resolved.properties {
-                if make_nullable {
-                    prop_schema.nullable = true;
-                    // For oneOf/anyOf: keep first definition (most permissive)
-                    merged.properties.entry(name).or_insert(prop_schema);
-                } else {
-                    // For allOf: later schemas refine/override earlier ones
-                    // This follows OpenAPI semantics where allOf combines schemas
-                    // and later definitions can provide more specific types
-                    merged.properties.insert(name, prop_schema);
-                }
+            // Later schemas refine/override earlier ones
+            for (name, prop_schema) in resolved.properties {
+                merged.properties.insert(name, prop_schema);
             }
 
-            // For allOf, all required fields stay required
-            // For oneOf/anyOf, nothing is required since we don't know which variant
-            if !make_nullable {
-                merged.required.extend(resolved.required);
+            merged.required.extend(resolved.required);
+        }
+
+        if has_any_properties {
+            merged.schema_type = Some("object".to_string());
+        }
+
+        merged.required.sort();
+        merged.required.dedup();
+
+        merged
+    }
+
+    /// Merge oneOf/anyOf schemas: all properties become nullable, first definition wins.
+    fn merge_union_schemas(&self, schemas: &[Schema], depth: usize) -> Schema {
+        let mut merged = Schema {
+            properties: HashMap::new(),
+            required: Vec::new(),
+            ..Default::default()
+        };
+
+        let mut has_any_properties = false;
+
+        for sub_schema in schemas {
+            let resolved = self.resolve_schema_with_depth(sub_schema, depth);
+
+            if !resolved.properties.is_empty() {
+                has_any_properties = true;
             }
+
+            // Keep first definition (most permissive), mark all nullable
+            for (name, mut prop_schema) in resolved.properties {
+                prop_schema.nullable = true;
+                merged.properties.entry(name).or_insert(prop_schema);
+            }
+
+            // Nothing is required — we don't know which variant applies
         }
 
         // Only set type to "object" if at least one sub-schema has properties.
@@ -418,10 +437,6 @@ impl OpenApiSpec {
         if has_any_properties {
             merged.schema_type = Some("object".to_string());
         }
-
-        // Deduplicate required fields
-        merged.required.sort();
-        merged.required.dedup();
 
         merged
     }
