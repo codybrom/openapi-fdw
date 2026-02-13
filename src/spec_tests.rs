@@ -3028,8 +3028,11 @@ fn test_allof_with_properties_sibling() {
     // allOf properties should be present
     assert!(resolved.properties.contains_key("id"));
     assert!(resolved.properties.contains_key("name"));
-    // Sibling properties from the outer schema are not included in allOf resolution
-    // (they live on the unresolvedschema, not merged by resolve_schema)
+    // Parent-level sibling properties are now merged alongside allOf (OpenAPI 3.1)
+    assert!(
+        resolved.properties.contains_key("sibling_prop"),
+        "sibling_prop should be merged from parent alongside allOf"
+    );
 }
 
 #[test]
@@ -5228,4 +5231,251 @@ fn test_excessive_branching_hits_call_limit_gracefully() {
 
     // Should still produce an object with merged properties (from the leaves that resolved)
     assert_eq!(resolved.schema_type, Some("object".to_string()));
+}
+
+// --- Parent sibling merging for composition keywords ---
+
+#[test]
+fn test_allof_with_parent_required_siblings() {
+    // Parent-level `required` alongside allOf should be merged into the result
+    let spec_json = r##"{
+        "openapi": "3.1.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "Base": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "name": {"type": "string"}
+                    },
+                    "required": ["id"]
+                },
+                "Extended": {
+                    "allOf": [
+                        {"$ref": "#/components/schemas/Base"}
+                    ],
+                    "properties": {
+                        "extra": {"type": "boolean"}
+                    },
+                    "required": ["name", "extra"]
+                }
+            }
+        }
+    }"##;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let extended = spec.resolve_ref("#/components/schemas/Extended").unwrap();
+    let resolved = spec.resolve_schema(extended);
+
+    assert!(resolved.properties.contains_key("id"));
+    assert!(resolved.properties.contains_key("name"));
+    assert!(resolved.properties.contains_key("extra"));
+    // Required from both Base and parent should be merged
+    assert!(resolved.required.contains(&"id".to_string()));
+    assert!(resolved.required.contains(&"name".to_string()));
+    assert!(resolved.required.contains(&"extra".to_string()));
+}
+
+#[test]
+fn test_oneof_with_parent_properties() {
+    // Parent-level properties alongside oneOf should be merged
+    let spec_json = r##"{
+        "openapi": "3.1.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "Mixed": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "variant_a": {"type": "string"}
+                            }
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "variant_b": {"type": "integer"}
+                            }
+                        }
+                    ],
+                    "properties": {
+                        "common": {"type": "boolean"}
+                    }
+                }
+            }
+        }
+    }"##;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let mixed = spec.resolve_ref("#/components/schemas/Mixed").unwrap();
+    let resolved = spec.resolve_schema(mixed);
+
+    assert!(resolved.properties.contains_key("variant_a"));
+    assert!(resolved.properties.contains_key("variant_b"));
+    assert!(
+        resolved.properties.contains_key("common"),
+        "parent-level 'common' should be merged alongside oneOf"
+    );
+}
+
+#[test]
+fn test_anyof_with_parent_properties() {
+    // Parent-level properties alongside anyOf should be merged
+    let spec_json = r##"{
+        "openapi": "3.1.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "Flexible": {
+                    "anyOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "opt_a": {"type": "string"}
+                            }
+                        }
+                    ],
+                    "properties": {
+                        "shared": {"type": "number"}
+                    }
+                }
+            }
+        }
+    }"##;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let flexible = spec.resolve_ref("#/components/schemas/Flexible").unwrap();
+    let resolved = spec.resolve_schema(flexible);
+
+    assert!(resolved.properties.contains_key("opt_a"));
+    assert!(
+        resolved.properties.contains_key("shared"),
+        "parent-level 'shared' should be merged alongside anyOf"
+    );
+}
+
+#[test]
+fn test_ref_with_allof_coexistence() {
+    // OpenAPI 3.1: $ref can coexist with allOf on the same schema
+    let spec_json = r##"{
+        "openapi": "3.1.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "Base": {
+                    "type": "object",
+                    "properties": {
+                        "base_field": {"type": "string"}
+                    }
+                },
+                "Mixin": {
+                    "type": "object",
+                    "properties": {
+                        "mixin_field": {"type": "integer"}
+                    }
+                },
+                "Combined": {
+                    "$ref": "#/components/schemas/Base",
+                    "allOf": [
+                        {"$ref": "#/components/schemas/Mixin"}
+                    ]
+                }
+            }
+        }
+    }"##;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let combined = spec.resolve_ref("#/components/schemas/Combined").unwrap();
+    let resolved = spec.resolve_schema(combined);
+
+    assert!(
+        resolved.properties.contains_key("base_field"),
+        "base_field from $ref should be present"
+    );
+    assert!(
+        resolved.properties.contains_key("mixin_field"),
+        "mixin_field from allOf should be merged alongside $ref"
+    );
+}
+
+#[test]
+fn test_ref_with_oneof_coexistence() {
+    // OpenAPI 3.1: $ref can coexist with oneOf
+    let spec_json = r##"{
+        "openapi": "3.1.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "Base": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"}
+                    }
+                },
+                "VariantA": {
+                    "type": "object",
+                    "properties": {
+                        "a_field": {"type": "boolean"}
+                    }
+                },
+                "Extended": {
+                    "$ref": "#/components/schemas/Base",
+                    "oneOf": [
+                        {"$ref": "#/components/schemas/VariantA"}
+                    ]
+                }
+            }
+        }
+    }"##;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let extended = spec.resolve_ref("#/components/schemas/Extended").unwrap();
+    let resolved = spec.resolve_schema(extended);
+
+    assert!(resolved.properties.contains_key("id"), "$ref id present");
+    assert!(
+        resolved.properties.contains_key("a_field"),
+        "oneOf a_field merged alongside $ref"
+    );
+}
+
+#[test]
+fn test_parent_nullable_propagates_to_composition() {
+    // Parent-level nullable should propagate through merge_parent_siblings
+    let spec_json = r##"{
+        "openapi": "3.1.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "NullableComposed": {
+                    "nullable": true,
+                    "allOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "field": {"type": "string"}
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+    }"##;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let schema = spec
+        .resolve_ref("#/components/schemas/NullableComposed")
+        .unwrap();
+    let resolved = spec.resolve_schema(schema);
+
+    assert!(resolved.properties.contains_key("field"));
+    assert!(resolved.nullable, "parent nullable should propagate");
 }

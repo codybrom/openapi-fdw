@@ -16,7 +16,6 @@ pub(crate) const DEFAULT_MAX_RESPONSE_BYTES: usize = 50 * 1024 * 1024; // 50 MiB
 /// (`page_size`, `page_size_param`, `cursor_param`) can be overridden
 /// per-table in `begin_scan`; call `save_pagination_defaults()` after
 /// init and `restore_pagination_defaults()` at the start of each scan.
-#[derive(Debug)]
 pub(crate) struct ServerConfig {
     pub(crate) base_url: String,
     pub(crate) headers: Vec<(String, String)>,
@@ -34,6 +33,29 @@ pub(crate) struct ServerConfig {
     pub(crate) default_page_size: usize,
     pub(crate) default_page_size_param: String,
     pub(crate) default_cursor_param: String,
+}
+
+/// Manual Debug impl to redact authentication secrets (headers may contain
+/// API keys or bearer tokens, and api_key_query contains the raw key value).
+impl std::fmt::Debug for ServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerConfig")
+            .field("base_url", &self.base_url)
+            .field("headers", &format!("[{} header(s)]", self.headers.len()))
+            .field("spec_url", &self.spec_url)
+            .field(
+                "api_key_query",
+                &self.api_key_query.as_ref().map(|(k, _)| format!("{k}=[REDACTED]")),
+            )
+            .field("include_attrs", &self.include_attrs)
+            .field("page_size", &self.page_size)
+            .field("page_size_param", &self.page_size_param)
+            .field("cursor_param", &self.cursor_param)
+            .field("max_pages", &self.max_pages)
+            .field("max_response_bytes", &self.max_response_bytes)
+            .field("debug", &self.debug)
+            .finish()
+    }
 }
 
 impl Default for ServerConfig {
@@ -140,7 +162,19 @@ impl ServerConfig {
         let header = opts.require_or("api_key_header", "Authorization");
         let prefix = opts.get("api_key_prefix");
 
-        self.apply_auth(api_key, bearer_token, &location, &header, prefix)
+        self.apply_auth(api_key, bearer_token, &location, &header, prefix)?;
+
+        // Warn if query auth uses the default header name (likely misconfiguration)
+        if location == "query" && header == "Authorization" && self.api_key_query.is_some() {
+            utils::report_warning(
+                "[openapi_fdw] api_key_location is 'query' but api_key_header \
+                 is the default 'Authorization'. This will send ?Authorization=<key> \
+                 as a query parameter, which is likely incorrect. Set api_key_header \
+                 to the actual query parameter name (e.g., 'api_key' or 'key').",
+            );
+        }
+
+        Ok(())
     }
 
     /// Apply authentication configuration from extracted option values.

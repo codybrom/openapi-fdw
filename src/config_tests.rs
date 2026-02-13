@@ -557,3 +557,76 @@ fn test_auth_unknown_location_defaults_to_header() {
     assert_eq!(config.headers[0].0, "authorization");
     assert_eq!(config.headers[0].1, "Bearer key");
 }
+
+// --- Debug impl redaction ---
+
+#[test]
+fn test_debug_redacts_headers() {
+    let mut config = ServerConfig::default();
+    config
+        .headers
+        .push(("authorization".to_string(), "Bearer secret-token".to_string()));
+    config
+        .headers
+        .push(("x-api-key".to_string(), "my-secret-key".to_string()));
+
+    let debug_output = format!("{:?}", config);
+    assert!(!debug_output.contains("secret-token"));
+    assert!(!debug_output.contains("my-secret-key"));
+    assert!(debug_output.contains("[2 header(s)]"));
+}
+
+#[test]
+fn test_debug_redacts_api_key_query() {
+    let mut config = ServerConfig::default();
+    config.api_key_query = Some(("api_key".to_string(), "super-secret".to_string()));
+
+    let debug_output = format!("{:?}", config);
+    assert!(!debug_output.contains("super-secret"));
+    assert!(debug_output.contains("api_key=[REDACTED]"));
+}
+
+#[test]
+fn test_debug_shows_non_sensitive_fields() {
+    let config = ServerConfig {
+        base_url: "https://api.example.com".to_string(),
+        max_pages: 500,
+        debug: true,
+        ..Default::default()
+    };
+
+    let debug_output = format!("{:?}", config);
+    assert!(debug_output.contains("https://api.example.com"));
+    assert!(debug_output.contains("500"));
+    assert!(debug_output.contains("true"));
+}
+
+#[test]
+fn test_debug_no_api_key_query_shows_none() {
+    let config = ServerConfig::default();
+    let debug_output = format!("{:?}", config);
+    assert!(debug_output.contains("api_key_query: None"));
+}
+
+// --- apply_auth: query + default header name ---
+
+#[test]
+fn test_auth_query_with_default_header_still_works() {
+    // Even though this is likely misconfigured (Authorization as query param name),
+    // the function should still set api_key_query correctly.
+    // The warning is emitted by configure_auth (WASM layer), not apply_auth.
+    let mut config = ServerConfig::default();
+    config
+        .apply_auth(
+            Some("key123".to_string()),
+            None,
+            "query",
+            "Authorization",
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        config.api_key_query,
+        Some(("Authorization".to_string(), "key123".to_string()))
+    );
+}

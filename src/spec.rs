@@ -362,23 +362,52 @@ impl OpenApiSpec {
                     result.required.sort();
                     result.required.dedup();
                 }
+                // OpenAPI 3.1: $ref can coexist with composition keywords
+                if !schema.all_of.is_empty() {
+                    let allof = self.merge_allof_schemas(&schema.all_of, depth + 1, call_count);
+                    for (name, prop) in allof.properties {
+                        result.properties.insert(name, prop);
+                    }
+                    result.required.extend(allof.required);
+                    result.required.sort();
+                    result.required.dedup();
+                }
+                if !schema.one_of.is_empty() {
+                    let oneof = self.merge_union_schemas(&schema.one_of, depth + 1, call_count);
+                    for (name, prop) in oneof.properties {
+                        result.properties.entry(name).or_insert(prop);
+                    }
+                }
+                if !schema.any_of.is_empty() {
+                    let anyof = self.merge_union_schemas(&schema.any_of, depth + 1, call_count);
+                    for (name, prop) in anyof.properties {
+                        result.properties.entry(name).or_insert(prop);
+                    }
+                }
                 return result;
             }
         }
 
         // Handle allOf by merging all properties (intersection - all schemas apply)
         if !schema.all_of.is_empty() {
-            return self.merge_allof_schemas(&schema.all_of, depth + 1, call_count);
+            let mut merged = self.merge_allof_schemas(&schema.all_of, depth + 1, call_count);
+            // Merge parent-level properties/required alongside allOf (OpenAPI 3.1)
+            Self::merge_parent_siblings(schema, &mut merged);
+            return merged;
         }
 
         // Handle oneOf by merging all possible properties as nullable (union - one of the schemas)
         if !schema.one_of.is_empty() {
-            return self.merge_union_schemas(&schema.one_of, depth + 1, call_count);
+            let mut merged = self.merge_union_schemas(&schema.one_of, depth + 1, call_count);
+            Self::merge_parent_siblings(schema, &mut merged);
+            return merged;
         }
 
         // Handle anyOf by merging all possible properties as nullable (union - any of the schemas)
         if !schema.any_of.is_empty() {
-            return self.merge_union_schemas(&schema.any_of, depth + 1, call_count);
+            let mut merged = self.merge_union_schemas(&schema.any_of, depth + 1, call_count);
+            Self::merge_parent_siblings(schema, &mut merged);
+            return merged;
         }
 
         schema.clone()
@@ -463,6 +492,31 @@ impl OpenApiSpec {
         }
 
         merged
+    }
+
+    /// Merge parent-level `properties` and `required` into a composition result.
+    ///
+    /// Per OpenAPI 3.1, properties defined alongside `allOf`/`oneOf`/`anyOf`
+    /// should be merged into the composed schema (parent properties override).
+    fn merge_parent_siblings(parent: &Schema, merged: &mut Schema) {
+        for (name, prop) in &parent.properties {
+            merged.properties.insert(name.clone(), prop.clone());
+        }
+        if !parent.required.is_empty() {
+            merged.required.extend(parent.required.iter().cloned());
+            merged.required.sort();
+            merged.required.dedup();
+        }
+        if parent.nullable {
+            merged.nullable = true;
+        }
+        if parent.write_only {
+            merged.write_only = true;
+        }
+        // Promote to object if parent has properties
+        if !parent.properties.is_empty() && merged.schema_type.is_none() {
+            merged.schema_type = Some("object".to_string());
+        }
     }
 }
 
