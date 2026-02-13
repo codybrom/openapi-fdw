@@ -3070,3 +3070,2076 @@ fn test_response_only_error_codes() {
     // No 200/201/2XX/default → response_schema should be None
     assert!(endpoints[0].response_schema.is_none());
 }
+
+// =============================================================================
+// OpenAPI 3.1 READ operation coverage — based on real-world API specifications
+// =============================================================================
+// Tests below are derived from actual patterns found in production OpenAPI 3.1
+// specs: GitHub REST API, Stripe API, Kubernetes API, DigitalOcean API, and
+// the OpenAPI 3.1 specification itself (JSON Schema 2020-12 alignment).
+
+// --- GitHub API 3.1: nullable format strings via type arrays ---
+
+#[test]
+fn test_github_31_nullable_datetime_type_array() {
+    // GitHub API: type: ["string", "null"] with format: "date-time"
+    // e.g., issue.closed_at, pull_request.merged_at
+    let schema: Schema =
+        serde_json::from_str(r#"{"type": ["string", "null"], "format": "date-time"}"#).unwrap();
+    assert_eq!(schema.schema_type, Some("string".to_string()));
+    assert!(schema.nullable);
+    assert_eq!(schema.format, Some("date-time".to_string()));
+}
+
+#[test]
+fn test_github_31_nullable_uri_type_array() {
+    // GitHub API: type: ["string", "null"] with format: "uri"
+    // e.g., repository.homepage, issue.body_url
+    let schema: Schema =
+        serde_json::from_str(r#"{"type": ["string", "null"], "format": "uri"}"#).unwrap();
+    assert_eq!(schema.schema_type, Some("string".to_string()));
+    assert!(schema.nullable);
+    assert_eq!(schema.format, Some("uri".to_string()));
+}
+
+#[test]
+fn test_github_31_nullable_date_type_array() {
+    // DigitalOcean/GitHub: type: ["string", "null"] with format: "date"
+    let schema: Schema =
+        serde_json::from_str(r#"{"type": ["string", "null"], "format": "date"}"#).unwrap();
+    assert_eq!(schema.schema_type, Some("string".to_string()));
+    assert!(schema.nullable);
+    assert_eq!(schema.format, Some("date".to_string()));
+}
+
+#[test]
+fn test_github_31_nullable_email_type_array() {
+    // GitHub API: type: ["string", "null"] with format: "email"
+    // e.g., user.email
+    let schema: Schema =
+        serde_json::from_str(r#"{"type": ["string", "null"], "format": "email"}"#).unwrap();
+    assert_eq!(schema.schema_type, Some("string".to_string()));
+    assert!(schema.nullable);
+    assert_eq!(schema.format, Some("email".to_string()));
+}
+
+// --- GitHub API 3.1: anyOf with all $ref variants (polymorphic events) ---
+
+#[test]
+fn test_github_31_anyof_all_refs() {
+    // GitHub API: timeline events use anyOf with multiple $ref variants
+    // e.g., GET /repos/{owner}/{repo}/issues/{issue_number}/timeline
+    let spec_json = r##"{
+        "openapi": "3.1.0",
+        "info": {"title": "GitHub", "version": "1.0"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "labeled-event": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "event": {"type": "string"},
+                        "label": {"type": "object", "properties": {"name": {"type": "string"}}}
+                    },
+                    "required": ["id", "event"]
+                },
+                "commented-event": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "event": {"type": "string"},
+                        "body": {"type": "string"}
+                    },
+                    "required": ["id", "event"]
+                },
+                "assigned-event": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "event": {"type": "string"},
+                        "assignee": {"$ref": "#/components/schemas/simple-user"}
+                    },
+                    "required": ["id", "event"]
+                },
+                "simple-user": {
+                    "type": "object",
+                    "properties": {
+                        "login": {"type": "string"},
+                        "id": {"type": "integer"}
+                    },
+                    "required": ["login", "id"]
+                },
+                "timeline-event": {
+                    "anyOf": [
+                        {"$ref": "#/components/schemas/labeled-event"},
+                        {"$ref": "#/components/schemas/commented-event"},
+                        {"$ref": "#/components/schemas/assigned-event"}
+                    ]
+                }
+            }
+        }
+    }"##;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let timeline = spec
+        .resolve_ref("#/components/schemas/timeline-event")
+        .unwrap();
+    let resolved = spec.resolve_schema(timeline);
+
+    // anyOf merges all variant properties as nullable
+    assert!(resolved.properties.contains_key("id"));
+    assert!(resolved.properties.contains_key("event"));
+    assert!(resolved.properties.contains_key("label"));
+    assert!(resolved.properties.contains_key("body"));
+    assert!(resolved.properties.contains_key("assignee"));
+
+    // All properties should be nullable (anyOf makes everything nullable)
+    assert!(resolved.properties.get("id").unwrap().nullable);
+    assert!(resolved.properties.get("event").unwrap().nullable);
+    assert!(resolved.properties.get("body").unwrap().nullable);
+
+    // Nothing should be required for anyOf
+    assert!(resolved.required.is_empty());
+}
+
+// --- GitHub API 3.1: nested anyOf inside allOf properties ---
+
+#[test]
+fn test_github_31_nested_anyof_inside_allof() {
+    // GitHub API pattern: pull_request uses allOf for inheritance,
+    // with nested anyOf for nullable ref fields inside the child schema
+    let spec_json = r##"{
+        "openapi": "3.1.0",
+        "info": {"title": "GitHub", "version": "1.0"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "simple-user": {
+                    "type": "object",
+                    "properties": {
+                        "login": {"type": "string"},
+                        "id": {"type": "integer"}
+                    },
+                    "required": ["login", "id"]
+                },
+                "milestone": {
+                    "type": "object",
+                    "properties": {
+                        "number": {"type": "integer"},
+                        "title": {"type": "string"},
+                        "state": {"type": "string"}
+                    },
+                    "required": ["number", "title"]
+                },
+                "issue-base": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "title": {"type": "string"},
+                        "state": {"type": "string"}
+                    },
+                    "required": ["id", "title", "state"]
+                },
+                "issue-full": {
+                    "allOf": [
+                        {"$ref": "#/components/schemas/issue-base"},
+                        {
+                            "type": "object",
+                            "properties": {
+                                "assignee": {
+                                    "anyOf": [
+                                        {"$ref": "#/components/schemas/simple-user"},
+                                        {"type": "null"}
+                                    ]
+                                },
+                                "milestone": {
+                                    "anyOf": [
+                                        {"$ref": "#/components/schemas/milestone"},
+                                        {"type": "null"}
+                                    ]
+                                },
+                                "body": {"type": ["string", "null"]}
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+    }"##;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let issue = spec.resolve_ref("#/components/schemas/issue-full").unwrap();
+    let resolved = spec.resolve_schema(issue);
+
+    // Should have base properties
+    assert!(resolved.properties.contains_key("id"));
+    assert!(resolved.properties.contains_key("title"));
+    assert!(resolved.properties.contains_key("state"));
+
+    // Should have extended properties
+    assert!(resolved.properties.contains_key("assignee"));
+    assert!(resolved.properties.contains_key("milestone"));
+    assert!(resolved.properties.contains_key("body"));
+
+    // body should be nullable (from type array)
+    let body = resolved.properties.get("body").unwrap();
+    assert!(body.nullable);
+    assert_eq!(body.schema_type, Some("string".to_string()));
+
+    // Required should come from base
+    assert!(resolved.required.contains(&"id".to_string()));
+    assert!(resolved.required.contains(&"title".to_string()));
+}
+
+// --- GitHub API 3.1: readOnly properties (should be INCLUDED in responses) ---
+
+#[test]
+fn test_github_31_readonly_property_included() {
+    // GitHub API: readOnly fields like id, node_id should appear in GET responses.
+    // Our parser ignores readOnly (it's not in Schema struct), which is correct
+    // behavior — readOnly properties SHOULD appear in responses.
+    let spec_json = r#"{
+        "openapi": "3.1.0",
+        "info": {"title": "GitHub", "version": "1.0"},
+        "paths": {
+            "/repos": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "id": {"type": "integer", "readOnly": true},
+                                                "node_id": {"type": "string", "readOnly": true},
+                                                "name": {"type": "string"},
+                                                "full_name": {"type": "string", "readOnly": true}
+                                            },
+                                            "required": ["id", "name", "full_name"]
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }"#;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let endpoints = spec.get_endpoints();
+    assert_eq!(endpoints.len(), 1);
+
+    let schema = endpoints[0].response_schema.as_ref().unwrap();
+    let items = schema.items.as_ref().unwrap();
+
+    // readOnly properties should still be present (they appear in responses)
+    assert!(items.properties.contains_key("id"));
+    assert!(items.properties.contains_key("node_id"));
+    assert!(items.properties.contains_key("name"));
+    assert!(items.properties.contains_key("full_name"));
+}
+
+// --- Stripe API 3.1: enum values in response schemas ---
+
+#[test]
+fn test_stripe_31_enum_string_property() {
+    // Stripe API: type: "string" with enum values (e.g., charge.status)
+    // Enums should still map to text type (our parser ignores enum values)
+    let schema: Schema =
+        serde_json::from_str(r#"{"type": "string", "enum": ["active", "inactive", "pending"]}"#)
+            .unwrap();
+    assert_eq!(schema.schema_type, Some("string".to_string()));
+    assert!(!schema.nullable);
+}
+
+#[test]
+fn test_stripe_31_nullable_enum_type_array() {
+    // Stripe API 3.1: type: ["string", "null"] with enum
+    // e.g., subscription.cancel_at_period_end reason
+    let schema: Schema = serde_json::from_str(
+        r#"{"type": ["string", "null"], "enum": ["duplicate", "fraudulent", "requested_by_customer", null]}"#,
+    )
+    .unwrap();
+    assert_eq!(schema.schema_type, Some("string".to_string()));
+    assert!(schema.nullable);
+}
+
+// --- Stripe API 3.1: nullable unix timestamps ---
+
+#[test]
+fn test_stripe_31_nullable_unix_time() {
+    // Stripe API: type: ["integer", "null"] with format: "unix-time"
+    // e.g., subscription.canceled_at, charge.refunded_at
+    let schema: Schema =
+        serde_json::from_str(r#"{"type": ["integer", "null"], "format": "unix-time"}"#).unwrap();
+    assert_eq!(schema.schema_type, Some("integer".to_string()));
+    assert!(schema.nullable);
+    assert_eq!(schema.format, Some("unix-time".to_string()));
+}
+
+// --- Stripe API: vendor extensions should be ignored ---
+
+#[test]
+fn test_stripe_31_vendor_extensions_ignored() {
+    // Stripe API uses x-expansionResources, x-resourceId, x-stripeBypassValidation, etc.
+    // These should be silently ignored by serde's default behavior
+    let schema: Schema = serde_json::from_str(
+        r##"{
+            "type": "object",
+            "x-resourceId": "charge",
+            "x-expansionResources": {"oneOf": [{"$ref": "#/components/schemas/customer"}]},
+            "x-stripeBypassValidation": true,
+            "properties": {
+                "id": {"type": "string"}
+            }
+        }"##,
+    )
+    .unwrap();
+    assert_eq!(schema.schema_type, Some("object".to_string()));
+    assert!(schema.properties.contains_key("id"));
+}
+
+// --- Kubernetes API: schema with no type but with properties ---
+
+#[test]
+fn test_kubernetes_implicit_object_no_type() {
+    // Kubernetes API: some schemas omit "type" but have "properties"
+    // e.g., io.k8s.api.core.v1.PodSpec — properties without explicit "type": "object"
+    let spec_json = r#"{
+        "openapi": "3.0.0",
+        "info": {"title": "K8s", "version": "1.0"},
+        "paths": {
+            "/api/v1/pods": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "properties": {
+                                            "apiVersion": {"type": "string"},
+                                            "kind": {"type": "string"},
+                                            "items": {
+                                                "type": "array",
+                                                "items": {
+                                                    "properties": {
+                                                        "name": {"type": "string"},
+                                                        "namespace": {"type": "string"}
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }"#;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let endpoints = spec.get_endpoints();
+    assert_eq!(endpoints.len(), 1);
+
+    let schema = endpoints[0].response_schema.as_ref().unwrap();
+    // Schema has no explicit type but has properties — should still parse
+    assert!(schema.properties.contains_key("apiVersion"));
+    assert!(schema.properties.contains_key("kind"));
+    assert!(schema.properties.contains_key("items"));
+    // schema_type should be None (no explicit type)
+    assert_eq!(schema.schema_type, None);
+}
+
+// --- Kubernetes API: numeric format strings ---
+
+#[test]
+fn test_kubernetes_format_int32() {
+    // Kubernetes API: format: "int32" on integer properties
+    let schema: Schema = serde_json::from_str(r#"{"type": "integer", "format": "int32"}"#).unwrap();
+    assert_eq!(schema.schema_type, Some("integer".to_string()));
+    assert_eq!(schema.format, Some("int32".to_string()));
+}
+
+#[test]
+fn test_kubernetes_format_int64() {
+    // Kubernetes API: format: "int64" on integer properties
+    let schema: Schema = serde_json::from_str(r#"{"type": "integer", "format": "int64"}"#).unwrap();
+    assert_eq!(schema.schema_type, Some("integer".to_string()));
+    assert_eq!(schema.format, Some("int64".to_string()));
+}
+
+#[test]
+fn test_kubernetes_format_double() {
+    // Kubernetes API: format: "double" on number properties
+    let schema: Schema = serde_json::from_str(r#"{"type": "number", "format": "double"}"#).unwrap();
+    assert_eq!(schema.schema_type, Some("number".to_string()));
+    assert_eq!(schema.format, Some("double".to_string()));
+}
+
+#[test]
+fn test_format_float() {
+    // General: format: "float" on number properties
+    let schema: Schema = serde_json::from_str(r#"{"type": "number", "format": "float"}"#).unwrap();
+    assert_eq!(schema.schema_type, Some("number".to_string()));
+    assert_eq!(schema.format, Some("float".to_string()));
+}
+
+// --- Kubernetes API: 3.1 nullable int32/int64 ---
+
+#[test]
+fn test_31_nullable_int32() {
+    // OpenAPI 3.1: type: ["integer", "null"] with format: "int32"
+    let schema: Schema =
+        serde_json::from_str(r#"{"type": ["integer", "null"], "format": "int32"}"#).unwrap();
+    assert_eq!(schema.schema_type, Some("integer".to_string()));
+    assert!(schema.nullable);
+    assert_eq!(schema.format, Some("int32".to_string()));
+}
+
+#[test]
+fn test_31_nullable_int64() {
+    // OpenAPI 3.1: type: ["integer", "null"] with format: "int64"
+    let schema: Schema =
+        serde_json::from_str(r#"{"type": ["integer", "null"], "format": "int64"}"#).unwrap();
+    assert_eq!(schema.schema_type, Some("integer".to_string()));
+    assert!(schema.nullable);
+    assert_eq!(schema.format, Some("int64".to_string()));
+}
+
+#[test]
+fn test_31_nullable_double() {
+    // OpenAPI 3.1: type: ["number", "null"] with format: "double"
+    // (already tested without null; testing nullable variant)
+    let schema: Schema =
+        serde_json::from_str(r#"{"type": ["number", "null"], "format": "double"}"#).unwrap();
+    assert_eq!(schema.schema_type, Some("number".to_string()));
+    assert!(schema.nullable);
+    assert_eq!(schema.format, Some("double".to_string()));
+}
+
+// --- DigitalOcean API: format: "uuid" ---
+
+#[test]
+fn test_digitalocean_format_uuid() {
+    // DigitalOcean API: format: "uuid" on string properties
+    let schema: Schema = serde_json::from_str(r#"{"type": "string", "format": "uuid"}"#).unwrap();
+    assert_eq!(schema.schema_type, Some("string".to_string()));
+    assert_eq!(schema.format, Some("uuid".to_string()));
+}
+
+#[test]
+fn test_31_nullable_uuid() {
+    // OpenAPI 3.1: type: ["string", "null"] with format: "uuid"
+    let schema: Schema =
+        serde_json::from_str(r#"{"type": ["string", "null"], "format": "uuid"}"#).unwrap();
+    assert_eq!(schema.schema_type, Some("string".to_string()));
+    assert!(schema.nullable);
+    assert_eq!(schema.format, Some("uuid".to_string()));
+}
+
+// --- OpenAPI 3.1 JSON Schema 2020-12: keywords that should be ignored ---
+
+#[test]
+fn test_31_defs_ignored() {
+    // OpenAPI 3.1 (JSON Schema 2020-12): "$defs" replaces "definitions"
+    // Should be silently ignored by serde
+    let schema: Schema = serde_json::from_str(
+        r#"{
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"}
+            },
+            "$defs": {
+                "helper": {"type": "string"}
+            }
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(schema.schema_type, Some("object".to_string()));
+    assert!(schema.properties.contains_key("name"));
+}
+
+#[test]
+fn test_31_comment_ignored() {
+    // OpenAPI 3.1 (JSON Schema 2020-12): "$comment" for documentation
+    let schema: Schema = serde_json::from_str(
+        r#"{"type": "string", "$comment": "This is an internal comment for schema authors"}"#,
+    )
+    .unwrap();
+    assert_eq!(schema.schema_type, Some("string".to_string()));
+}
+
+#[test]
+fn test_31_if_then_else_ignored() {
+    // OpenAPI 3.1 (JSON Schema 2020-12): if/then/else conditional schemas
+    // Our parser ignores these (they don't affect type resolution for FDW)
+    let schema: Schema = serde_json::from_str(
+        r#"{
+            "type": "object",
+            "properties": {
+                "type": {"type": "string"},
+                "value": {"type": "string"}
+            },
+            "if": {"properties": {"type": {"const": "email"}}},
+            "then": {"properties": {"value": {"format": "email"}}},
+            "else": {"properties": {"value": {"format": "uri"}}}
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(schema.schema_type, Some("object".to_string()));
+    assert!(schema.properties.contains_key("type"));
+    assert!(schema.properties.contains_key("value"));
+}
+
+#[test]
+fn test_31_dependent_required_ignored() {
+    // OpenAPI 3.1 (JSON Schema 2020-12): dependentRequired
+    let schema: Schema = serde_json::from_str(
+        r#"{
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "credit_card": {"type": "string"},
+                "billing_address": {"type": "string"}
+            },
+            "dependentRequired": {
+                "credit_card": ["billing_address"]
+            }
+        }"#,
+    )
+    .unwrap();
+    assert!(schema.properties.contains_key("name"));
+    assert!(schema.properties.contains_key("credit_card"));
+    assert!(schema.properties.contains_key("billing_address"));
+}
+
+#[test]
+fn test_31_prefix_items_ignored() {
+    // OpenAPI 3.1 (JSON Schema 2020-12): prefixItems for tuple validation
+    let schema: Schema = serde_json::from_str(
+        r#"{
+            "type": "array",
+            "prefixItems": [
+                {"type": "number"},
+                {"type": "string"},
+                {"type": "string"}
+            ]
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(schema.schema_type, Some("array".to_string()));
+}
+
+#[test]
+fn test_31_pattern_properties_ignored() {
+    // OpenAPI 3.1 (JSON Schema 2020-12): patternProperties
+    let schema: Schema = serde_json::from_str(
+        r#"{
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"}
+            },
+            "patternProperties": {
+                "^x-": {"type": "string"}
+            }
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(schema.schema_type, Some("object".to_string()));
+    assert!(schema.properties.contains_key("name"));
+    // patternProperties should not appear in regular properties
+    assert!(!schema.properties.contains_key("^x-"));
+}
+
+#[test]
+fn test_31_unevaluated_properties_ignored() {
+    // OpenAPI 3.1 (JSON Schema 2020-12): unevaluatedProperties
+    let schema: Schema = serde_json::from_str(
+        r#"{
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"}
+            },
+            "unevaluatedProperties": false
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(schema.schema_type, Some("object".to_string()));
+    assert!(schema.properties.contains_key("name"));
+}
+
+#[test]
+fn test_31_content_media_type_encoding_ignored() {
+    // OpenAPI 3.1 (JSON Schema 2020-12): contentMediaType and contentEncoding
+    // for binary/encoded string data
+    let schema: Schema = serde_json::from_str(
+        r#"{
+            "type": "string",
+            "contentMediaType": "image/png",
+            "contentEncoding": "base64"
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(schema.schema_type, Some("string".to_string()));
+}
+
+#[test]
+fn test_31_exclusive_min_max_as_numbers_ignored() {
+    // OpenAPI 3.1 (JSON Schema 2020-12): exclusiveMinimum/exclusiveMaximum are now
+    // numbers (not booleans as in 3.0). Should be silently ignored.
+    let schema: Schema = serde_json::from_str(
+        r#"{"type": "integer", "exclusiveMinimum": 0, "exclusiveMaximum": 100}"#,
+    )
+    .unwrap();
+    assert_eq!(schema.schema_type, Some("integer".to_string()));
+}
+
+// --- Deprecated properties and operations ---
+
+#[test]
+fn test_31_deprecated_property_still_included() {
+    // OpenAPI 3.1: deprecated: true on a property should not exclude it
+    // (deprecated means "avoid using" not "removed")
+    let spec_json = r#"{
+        "openapi": "3.1.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {
+            "/users": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "id": {"type": "integer"},
+                                            "login": {"type": "string"},
+                                            "gravatar_id": {
+                                                "type": ["string", "null"],
+                                                "deprecated": true
+                                            }
+                                        },
+                                        "required": ["id", "login"]
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }"#;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let endpoints = spec.get_endpoints();
+    assert_eq!(endpoints.len(), 1);
+
+    let schema = endpoints[0].response_schema.as_ref().unwrap();
+    // Deprecated property should still be present
+    assert!(schema.properties.contains_key("gravatar_id"));
+    let gravatar = schema.properties.get("gravatar_id").unwrap();
+    assert!(gravatar.nullable);
+    assert_eq!(gravatar.schema_type, Some("string".to_string()));
+}
+
+#[test]
+fn test_31_deprecated_operation_still_included() {
+    // OpenAPI 3.1: deprecated: true on an operation should still be included
+    // (the endpoint still works, just discouraged)
+    let spec_json = r#"{
+        "openapi": "3.1.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {
+            "/legacy/items": {
+                "get": {
+                    "deprecated": true,
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "id": {"type": "string"}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }"#;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let endpoints = spec.get_endpoints();
+    // Deprecated operations should still be discovered
+    assert_eq!(endpoints.len(), 1);
+    assert!(endpoints[0].response_schema.is_some());
+}
+
+// --- POST-for-read with OpenAPI 3.1 type arrays ---
+
+#[test]
+fn test_31_post_for_read_with_type_arrays() {
+    // POST-for-read (e.g., Elasticsearch-style search) with 3.1 type arrays in response
+    let spec_json = r#"{
+        "openapi": "3.1.0",
+        "info": {"title": "Search API", "version": "1.0"},
+        "paths": {
+            "/search": {
+                "post": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "hits": {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "id": {"type": "string"},
+                                                        "score": {"type": ["number", "null"]},
+                                                        "matched_at": {"type": ["string", "null"], "format": "date-time"},
+                                                        "highlight": {"type": ["object", "null"]}
+                                                    },
+                                                    "required": ["id"]
+                                                }
+                                            },
+                                            "total": {"type": "integer"},
+                                            "max_score": {"type": ["number", "null"]}
+                                        },
+                                        "required": ["hits", "total"]
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }"#;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let endpoints = spec.get_endpoints();
+    assert_eq!(endpoints.len(), 1);
+    assert_eq!(endpoints[0].method, "POST");
+    assert_eq!(endpoints[0].table_name(), "search_post");
+
+    let schema = endpoints[0].response_schema.as_ref().unwrap();
+    assert!(schema.properties.contains_key("hits"));
+    assert!(schema.properties.contains_key("total"));
+
+    let max_score = schema.properties.get("max_score").unwrap();
+    assert!(max_score.nullable);
+    assert_eq!(max_score.schema_type, Some("number".to_string()));
+}
+
+// --- Response $ref to schema that uses allOf (double indirection) ---
+
+#[test]
+fn test_31_response_ref_to_allof_schema() {
+    // Real pattern: response has $ref to a schema, which itself is an allOf.
+    // GitHub API uses this for pull-request (allOf of issue + extra fields).
+    let spec_json = r##"{
+        "openapi": "3.1.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {
+            "/pulls": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "array",
+                                        "items": {"$ref": "#/components/schemas/pull-request"}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "components": {
+            "schemas": {
+                "issue-base": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "title": {"type": "string"},
+                        "state": {"type": "string"},
+                        "created_at": {"type": "string", "format": "date-time"}
+                    },
+                    "required": ["id", "title", "state"]
+                },
+                "pull-request": {
+                    "allOf": [
+                        {"$ref": "#/components/schemas/issue-base"},
+                        {
+                            "type": "object",
+                            "properties": {
+                                "merged": {"type": "boolean"},
+                                "merged_at": {"type": ["string", "null"], "format": "date-time"},
+                                "commits": {"type": "integer"},
+                                "additions": {"type": "integer"},
+                                "deletions": {"type": "integer"}
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+    }"##;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let endpoints = spec.get_endpoints();
+    assert_eq!(endpoints.len(), 1);
+
+    let schema = endpoints[0].response_schema.as_ref().unwrap();
+    let items = schema.items.as_ref().unwrap();
+    let resolved = spec.resolve_schema(items);
+
+    // Should have all properties from the allOf chain
+    assert!(resolved.properties.contains_key("id"));
+    assert!(resolved.properties.contains_key("title"));
+    assert!(resolved.properties.contains_key("state"));
+    assert!(resolved.properties.contains_key("created_at"));
+    assert!(resolved.properties.contains_key("merged"));
+    assert!(resolved.properties.contains_key("merged_at"));
+    assert!(resolved.properties.contains_key("commits"));
+
+    // merged_at should be nullable
+    let merged_at = resolved.properties.get("merged_at").unwrap();
+    assert!(merged_at.nullable);
+    assert_eq!(merged_at.format, Some("date-time".to_string()));
+
+    // Required should include base requirements
+    assert!(resolved.required.contains(&"id".to_string()));
+    assert!(resolved.required.contains(&"title".to_string()));
+}
+
+// --- anyOf with $ref + inline type + null (3 variants) ---
+
+#[test]
+fn test_31_anyof_three_variants_ref_inline_null() {
+    // Real pattern: anyOf: [{$ref: "..."}, {type: "string"}, {type: "null"}]
+    // This appears in APIs where a field can be an ID string, expanded object, or null
+    let spec_json = r##"{
+        "openapi": "3.1.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "Account": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "email": {"type": "string"}
+                    },
+                    "required": ["id"]
+                },
+                "Transaction": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "source": {
+                            "anyOf": [
+                                {"type": "string"},
+                                {"$ref": "#/components/schemas/Account"},
+                                {"type": "null"}
+                            ]
+                        }
+                    }
+                }
+            }
+        }
+    }"##;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let txn = spec
+        .resolve_ref("#/components/schemas/Transaction")
+        .unwrap();
+    let resolved = spec.resolve_schema(txn);
+
+    assert!(resolved.properties.contains_key("id"));
+    assert!(resolved.properties.contains_key("source"));
+
+    // source is anyOf with 3 variants — should merge and resolve
+    let source = resolved.properties.get("source").unwrap();
+    let source_resolved = spec.resolve_schema(source);
+    // The Account ref has properties, so merge produces object-like schema
+    assert!(
+        source_resolved.properties.contains_key("id")
+            || source_resolved.schema_type.is_some()
+            || source_resolved.properties.contains_key("email")
+    );
+}
+
+// --- Schema with items but no explicit type: "array" ---
+
+#[test]
+fn test_schema_items_without_array_type() {
+    // Some APIs define items without an explicit type: "array"
+    // The schema should still parse (items is present even without type)
+    let schema: Schema = serde_json::from_str(
+        r#"{
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"}
+                }
+            }
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(schema.schema_type, None);
+    assert!(schema.items.is_some());
+    let items = schema.items.as_ref().unwrap();
+    assert!(items.properties.contains_key("id"));
+}
+
+// --- Full end-to-end: OpenAPI 3.1 spec with comprehensive patterns ---
+
+#[test]
+fn test_31_full_e2e_github_style_spec() {
+    // End-to-end test modeled after GitHub API 3.1.0 structure:
+    // - Multiple endpoints (GET + POST)
+    // - Type arrays for nullable
+    // - $ref resolution through allOf chains
+    // - anyOf with null for nullable refs
+    // - Format strings (date-time, uri)
+    // - Response $ref to components/responses
+    let spec_json = r##"{
+        "openapi": "3.1.0",
+        "info": {"title": "GitHub-style API", "version": "2024-01-01"},
+        "servers": [
+            {
+                "url": "https://api.github.com"
+            }
+        ],
+        "paths": {
+            "/repos": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "List repositories",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "array",
+                                        "items": {"$ref": "#/components/schemas/repository"}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "/repos/search": {
+                "post": {
+                    "responses": {
+                        "200": {
+                            "description": "Search repositories",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "total_count": {"type": "integer"},
+                                            "incomplete_results": {"type": "boolean"},
+                                            "items": {
+                                                "type": "array",
+                                                "items": {"$ref": "#/components/schemas/repository"}
+                                            }
+                                        },
+                                        "required": ["total_count", "incomplete_results", "items"]
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "/notifications": {
+                "get": {
+                    "responses": {
+                        "200": {"$ref": "#/components/responses/NotificationList"}
+                    }
+                }
+            }
+        },
+        "components": {
+            "schemas": {
+                "simple-user": {
+                    "type": "object",
+                    "properties": {
+                        "login": {"type": "string"},
+                        "id": {"type": "integer"},
+                        "avatar_url": {"type": "string", "format": "uri"},
+                        "html_url": {"type": "string", "format": "uri"}
+                    },
+                    "required": ["login", "id", "avatar_url", "html_url"]
+                },
+                "license": {
+                    "type": "object",
+                    "properties": {
+                        "key": {"type": "string"},
+                        "name": {"type": "string"},
+                        "spdx_id": {"type": ["string", "null"]},
+                        "url": {"type": ["string", "null"], "format": "uri"}
+                    },
+                    "required": ["key", "name"]
+                },
+                "repository": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "name": {"type": "string"},
+                        "full_name": {"type": "string"},
+                        "private": {"type": "boolean"},
+                        "owner": {"$ref": "#/components/schemas/simple-user"},
+                        "description": {"type": ["string", "null"]},
+                        "fork": {"type": "boolean"},
+                        "html_url": {"type": "string", "format": "uri"},
+                        "created_at": {"type": "string", "format": "date-time"},
+                        "updated_at": {"type": "string", "format": "date-time"},
+                        "pushed_at": {"type": ["string", "null"], "format": "date-time"},
+                        "homepage": {"type": ["string", "null"], "format": "uri"},
+                        "size": {"type": "integer"},
+                        "stargazers_count": {"type": "integer"},
+                        "language": {"type": ["string", "null"]},
+                        "archived": {"type": "boolean"},
+                        "disabled": {"type": "boolean"},
+                        "license": {
+                            "anyOf": [
+                                {"$ref": "#/components/schemas/license"},
+                                {"type": "null"}
+                            ]
+                        },
+                        "topics": {
+                            "type": "array",
+                            "items": {"type": "string"}
+                        }
+                    },
+                    "required": ["id", "name", "full_name", "private", "fork"]
+                },
+                "notification-subject": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "type": {"type": "string"},
+                        "url": {"type": ["string", "null"], "format": "uri"}
+                    },
+                    "required": ["title", "type"]
+                },
+                "notification": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "unread": {"type": "boolean"},
+                        "reason": {"type": "string"},
+                        "updated_at": {"type": "string", "format": "date-time"},
+                        "subject": {"$ref": "#/components/schemas/notification-subject"},
+                        "repository": {"$ref": "#/components/schemas/repository"}
+                    },
+                    "required": ["id", "unread", "reason", "updated_at"]
+                }
+            },
+            "responses": {
+                "NotificationList": {
+                    "description": "List of notifications",
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "array",
+                                "items": {"$ref": "#/components/schemas/notification"}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }"##;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+
+    // Server URL
+    assert_eq!(spec.base_url(), Some("https://api.github.com".to_string()));
+
+    // Should have 3 endpoints: GET /repos, POST /repos/search, GET /notifications
+    let endpoints = spec.get_endpoints();
+    assert_eq!(endpoints.len(), 3);
+
+    // Endpoints should be sorted
+    assert_eq!(endpoints[0].path, "/notifications");
+    assert_eq!(endpoints[0].method, "GET");
+    assert_eq!(endpoints[1].path, "/repos");
+    assert_eq!(endpoints[1].method, "GET");
+    assert_eq!(endpoints[2].path, "/repos/search");
+    assert_eq!(endpoints[2].method, "POST");
+
+    // Table names
+    assert_eq!(endpoints[0].table_name(), "notifications");
+    assert_eq!(endpoints[1].table_name(), "repos");
+    assert_eq!(endpoints[2].table_name(), "repos_search_post");
+
+    // --- Verify /repos response schema ---
+    let repos_schema = endpoints[1].response_schema.as_ref().unwrap();
+    let repos_items = repos_schema.items.as_ref().unwrap();
+    let repo_resolved = spec.resolve_schema(repos_items);
+
+    assert!(repo_resolved.properties.contains_key("id"));
+    assert!(repo_resolved.properties.contains_key("name"));
+    assert!(repo_resolved.properties.contains_key("description"));
+    assert!(repo_resolved.properties.contains_key("language"));
+    assert!(repo_resolved.properties.contains_key("license"));
+    assert!(repo_resolved.properties.contains_key("topics"));
+
+    // description is nullable (type: ["string", "null"])
+    let desc = repo_resolved.properties.get("description").unwrap();
+    assert!(desc.nullable);
+    assert_eq!(desc.schema_type, Some("string".to_string()));
+
+    // pushed_at is nullable datetime
+    let pushed_at = repo_resolved.properties.get("pushed_at").unwrap();
+    assert!(pushed_at.nullable);
+    assert_eq!(pushed_at.format, Some("date-time".to_string()));
+
+    // --- Verify /notifications response (via $ref to components/responses) ---
+    let notif_schema = endpoints[0].response_schema.as_ref().unwrap();
+    let notif_items = notif_schema.items.as_ref().unwrap();
+    let notif_resolved = spec.resolve_schema(notif_items);
+
+    assert!(notif_resolved.properties.contains_key("id"));
+    assert!(notif_resolved.properties.contains_key("unread"));
+    assert!(notif_resolved.properties.contains_key("reason"));
+    assert!(notif_resolved.properties.contains_key("subject"));
+    assert!(notif_resolved.properties.contains_key("repository"));
+
+    // --- Verify POST search response ---
+    let search_schema = endpoints[2].response_schema.as_ref().unwrap();
+    assert!(search_schema.properties.contains_key("total_count"));
+    assert!(search_schema.properties.contains_key("items"));
+}
+
+// --- Stripe-style full spec with 3.1 patterns ---
+
+#[test]
+fn test_31_full_e2e_stripe_style_spec() {
+    // End-to-end test modeled after Stripe API 3.1.0:
+    // - List pagination wrapper (data/has_more/url)
+    // - Expandable fields (anyOf: [string, $ref])
+    // - Type arrays for nullable
+    // - Unix timestamps
+    // - Metadata as untyped object
+    let spec_json = r##"{
+        "openapi": "3.1.0",
+        "info": {"title": "Stripe-style API", "version": "2024-01-01"},
+        "servers": [{"url": "https://api.stripe.com"}],
+        "paths": {
+            "/v1/customers": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "object": {"type": "string"},
+                                            "data": {
+                                                "type": "array",
+                                                "items": {"$ref": "#/components/schemas/customer"}
+                                            },
+                                            "has_more": {"type": "boolean"},
+                                            "url": {"type": "string"}
+                                        },
+                                        "required": ["object", "data", "has_more", "url"]
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "components": {
+            "schemas": {
+                "address": {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": ["string", "null"]},
+                        "country": {"type": ["string", "null"]},
+                        "line1": {"type": ["string", "null"]},
+                        "line2": {"type": ["string", "null"]},
+                        "postal_code": {"type": ["string", "null"]},
+                        "state": {"type": ["string", "null"]}
+                    }
+                },
+                "customer": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "object": {"type": "string"},
+                        "created": {"type": "integer", "format": "unix-time"},
+                        "email": {"type": ["string", "null"]},
+                        "name": {"type": ["string", "null"]},
+                        "phone": {"type": ["string", "null"]},
+                        "description": {"type": ["string", "null"]},
+                        "balance": {"type": "integer"},
+                        "currency": {"type": ["string", "null"]},
+                        "delinquent": {"type": ["boolean", "null"]},
+                        "livemode": {"type": "boolean"},
+                        "address": {
+                            "anyOf": [
+                                {"$ref": "#/components/schemas/address"},
+                                {"type": "null"}
+                            ]
+                        },
+                        "metadata": {"type": "object"}
+                    },
+                    "required": ["id", "object", "created", "livemode"]
+                }
+            }
+        }
+    }"##;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let endpoints = spec.get_endpoints();
+    assert_eq!(endpoints.len(), 1);
+
+    let schema = endpoints[0].response_schema.as_ref().unwrap();
+    let data = schema.properties.get("data").unwrap();
+    let items = data.items.as_ref().unwrap();
+    let customer = spec.resolve_schema(items);
+
+    // Verify all properties present
+    assert!(customer.properties.contains_key("id"));
+    assert!(customer.properties.contains_key("created"));
+    assert!(customer.properties.contains_key("email"));
+    assert!(customer.properties.contains_key("address"));
+    assert!(customer.properties.contains_key("metadata"));
+
+    // Verify nullable fields
+    assert!(customer.properties.get("email").unwrap().nullable);
+    assert!(customer.properties.get("name").unwrap().nullable);
+    assert!(customer.properties.get("phone").unwrap().nullable);
+    assert!(customer.properties.get("delinquent").unwrap().nullable);
+
+    // Verify non-nullable fields
+    assert!(!customer.properties.get("livemode").unwrap().nullable);
+    assert!(!customer.properties.get("id").unwrap().nullable);
+
+    // Verify created has unix-time format
+    let created = customer.properties.get("created").unwrap();
+    assert_eq!(created.format, Some("unix-time".to_string()));
+    assert_eq!(created.schema_type, Some("integer".to_string()));
+}
+
+// --- oneOf with discriminator + mapping ---
+
+#[test]
+fn test_31_oneof_with_discriminator_and_mapping() {
+    // OpenAPI 3.1: oneOf with discriminator.mapping for polymorphic types
+    // Mapping provides URI-based resolution hints (we ignore mapping, just merge variants)
+    let spec_json = r##"{
+        "openapi": "3.1.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "CreditCard": {
+                    "type": "object",
+                    "properties": {
+                        "type": {"type": "string"},
+                        "last_four": {"type": "string"},
+                        "brand": {"type": "string"}
+                    },
+                    "required": ["type"]
+                },
+                "BankAccount": {
+                    "type": "object",
+                    "properties": {
+                        "type": {"type": "string"},
+                        "routing_number": {"type": "string"},
+                        "account_holder": {"type": "string"}
+                    },
+                    "required": ["type"]
+                },
+                "PaymentMethod": {
+                    "oneOf": [
+                        {"$ref": "#/components/schemas/CreditCard"},
+                        {"$ref": "#/components/schemas/BankAccount"}
+                    ],
+                    "discriminator": {
+                        "propertyName": "type",
+                        "mapping": {
+                            "credit_card": "#/components/schemas/CreditCard",
+                            "bank_account": "#/components/schemas/BankAccount"
+                        }
+                    }
+                }
+            }
+        }
+    }"##;
+
+    // Should parse without error (discriminator + mapping ignored by serde)
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let pm = spec
+        .resolve_ref("#/components/schemas/PaymentMethod")
+        .unwrap();
+    let resolved = spec.resolve_schema(pm);
+
+    // oneOf merges all variant properties as nullable
+    assert!(resolved.properties.contains_key("type"));
+    assert!(resolved.properties.contains_key("last_four"));
+    assert!(resolved.properties.contains_key("brand"));
+    assert!(resolved.properties.contains_key("routing_number"));
+    assert!(resolved.properties.contains_key("account_holder"));
+}
+
+// --- allOf where one schema adds only required (no new properties) ---
+
+#[test]
+fn test_31_allof_ref_with_additional_required_only() {
+    // Kubernetes pattern: allOf: [{$ref}, {required: [...]}]
+    // The second schema only adds required constraints, no new properties
+    let spec_json = r##"{
+        "openapi": "3.1.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "Resource": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "name": {"type": "string"},
+                        "status": {"type": "string"}
+                    }
+                },
+                "StrictResource": {
+                    "allOf": [
+                        {"$ref": "#/components/schemas/Resource"},
+                        {
+                            "required": ["id", "name", "status"]
+                        }
+                    ]
+                }
+            }
+        }
+    }"##;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let strict = spec
+        .resolve_ref("#/components/schemas/StrictResource")
+        .unwrap();
+    let resolved = spec.resolve_schema(strict);
+
+    assert!(resolved.properties.contains_key("id"));
+    assert!(resolved.properties.contains_key("name"));
+    assert!(resolved.properties.contains_key("status"));
+    assert!(resolved.required.contains(&"id".to_string()));
+    assert!(resolved.required.contains(&"name".to_string()));
+    assert!(resolved.required.contains(&"status".to_string()));
+}
+
+// --- Response with only binary content (application/octet-stream) ---
+
+#[test]
+fn test_response_only_binary_content() {
+    // Some APIs return binary data — schema should still be extracted via fallback
+    let spec_json = r#"{
+        "openapi": "3.0.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {
+            "/download": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "Binary file",
+                            "content": {
+                                "application/octet-stream": {
+                                    "schema": {
+                                        "type": "string",
+                                        "format": "binary"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }"#;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let endpoints = spec.get_endpoints();
+    assert_eq!(endpoints.len(), 1);
+    // Should fall back to the only available content type
+    let schema = endpoints[0].response_schema.as_ref().unwrap();
+    assert_eq!(schema.schema_type, Some("string".to_string()));
+    assert_eq!(schema.format, Some("binary".to_string()));
+}
+
+// --- Multiple $ref resolution through response → ref → allOf → ref chain ---
+
+#[test]
+fn test_31_triple_indirection_response_ref_allof_ref() {
+    // Response $ref → components/responses → schema $ref → allOf → $ref
+    // This tests the deepest indirection chain common in real APIs
+    let spec_json = r##"{
+        "openapi": "3.1.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {
+            "/resources": {
+                "get": {
+                    "responses": {
+                        "200": {"$ref": "#/components/responses/ResourceList"}
+                    }
+                }
+            }
+        },
+        "components": {
+            "schemas": {
+                "Timestamps": {
+                    "type": "object",
+                    "properties": {
+                        "created_at": {"type": "string", "format": "date-time"},
+                        "updated_at": {"type": ["string", "null"], "format": "date-time"}
+                    },
+                    "required": ["created_at"]
+                },
+                "Resource": {
+                    "allOf": [
+                        {"$ref": "#/components/schemas/Timestamps"},
+                        {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string", "format": "uuid"},
+                                "name": {"type": "string"},
+                                "status": {"type": "string"}
+                            },
+                            "required": ["id", "name"]
+                        }
+                    ]
+                }
+            },
+            "responses": {
+                "ResourceList": {
+                    "description": "List of resources",
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "array",
+                                "items": {"$ref": "#/components/schemas/Resource"}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }"##;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let endpoints = spec.get_endpoints();
+    assert_eq!(endpoints.len(), 1);
+
+    let schema = endpoints[0].response_schema.as_ref().unwrap();
+    let items = schema.items.as_ref().unwrap();
+    let resolved = spec.resolve_schema(items);
+
+    // Should have all properties from the entire chain
+    assert!(resolved.properties.contains_key("created_at"));
+    assert!(resolved.properties.contains_key("updated_at"));
+    assert!(resolved.properties.contains_key("id"));
+    assert!(resolved.properties.contains_key("name"));
+    assert!(resolved.properties.contains_key("status"));
+
+    // updated_at should be nullable
+    let updated = resolved.properties.get("updated_at").unwrap();
+    assert!(updated.nullable);
+
+    // id should have uuid format
+    let id = resolved.properties.get("id").unwrap();
+    assert_eq!(id.format, Some("uuid".to_string()));
+
+    // Required should include from both
+    assert!(resolved.required.contains(&"created_at".to_string()));
+    assert!(resolved.required.contains(&"id".to_string()));
+    assert!(resolved.required.contains(&"name".to_string()));
+}
+
+// --- Format strings: byte and binary (base64 encoded content) ---
+
+#[test]
+fn test_format_byte_base64() {
+    // OpenAPI: format: "byte" for base64-encoded binary data
+    let schema: Schema = serde_json::from_str(r#"{"type": "string", "format": "byte"}"#).unwrap();
+    assert_eq!(schema.schema_type, Some("string".to_string()));
+    assert_eq!(schema.format, Some("byte".to_string()));
+}
+
+#[test]
+fn test_format_binary() {
+    // OpenAPI: format: "binary" for raw binary data
+    let schema: Schema = serde_json::from_str(r#"{"type": "string", "format": "binary"}"#).unwrap();
+    assert_eq!(schema.schema_type, Some("string".to_string()));
+    assert_eq!(schema.format, Some("binary".to_string()));
+}
+
+// --- Format string: time ---
+
+#[test]
+fn test_format_time() {
+    // OpenAPI: format: "time" for time-only values
+    let schema: Schema = serde_json::from_str(r#"{"type": "string", "format": "time"}"#).unwrap();
+    assert_eq!(schema.schema_type, Some("string".to_string()));
+    assert_eq!(schema.format, Some("time".to_string()));
+}
+
+// --- OpenAPI 3.1: $ref with siblings combined (nullable + writeOnly + required) ---
+
+#[test]
+fn test_31_ref_with_multiple_siblings() {
+    // OpenAPI 3.1: $ref with nullable + additional required fields merged
+    let spec_json = r##"{
+        "openapi": "3.1.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "Address": {
+                    "type": "object",
+                    "properties": {
+                        "line1": {"type": "string"},
+                        "city": {"type": "string"},
+                        "country": {"type": "string"}
+                    },
+                    "required": ["line1"]
+                }
+            }
+        }
+    }"##;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+
+    // Construct a $ref with multiple siblings
+    let mut extra_props = HashMap::new();
+    extra_props.insert(
+        "verified".to_string(),
+        Schema {
+            schema_type: Some("boolean".to_string()),
+            ..Default::default()
+        },
+    );
+
+    let ref_with_siblings = Schema {
+        reference: Some("#/components/schemas/Address".to_string()),
+        nullable: true,
+        write_only: true,
+        properties: extra_props,
+        required: vec!["city".to_string(), "verified".to_string()],
+        ..Default::default()
+    };
+
+    let resolved = spec.resolve_schema(&ref_with_siblings);
+
+    // All original properties + sibling properties
+    assert!(resolved.properties.contains_key("line1"));
+    assert!(resolved.properties.contains_key("city"));
+    assert!(resolved.properties.contains_key("country"));
+    assert!(resolved.properties.contains_key("verified"));
+
+    // Siblings merged
+    assert!(resolved.nullable);
+    assert!(resolved.write_only);
+
+    // Required merged and deduplicated
+    assert!(resolved.required.contains(&"line1".to_string()));
+    assert!(resolved.required.contains(&"city".to_string()));
+    assert!(resolved.required.contains(&"verified".to_string()));
+}
+
+// --- Empty oneOf/anyOf (edge case) ---
+
+#[test]
+fn test_empty_oneof() {
+    // Edge case: oneOf with no variants
+    let spec_json = r#"{
+        "openapi": "3.0.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "Empty": {
+                    "oneOf": []
+                }
+            }
+        }
+    }"#;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let empty = spec.resolve_ref("#/components/schemas/Empty").unwrap();
+    let resolved = spec.resolve_schema(empty);
+    assert!(resolved.properties.is_empty());
+}
+
+#[test]
+fn test_empty_anyof() {
+    // Edge case: anyOf with no variants
+    let spec_json = r#"{
+        "openapi": "3.0.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "Empty": {
+                    "anyOf": []
+                }
+            }
+        }
+    }"#;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let empty = spec.resolve_ref("#/components/schemas/Empty").unwrap();
+    let resolved = spec.resolve_schema(empty);
+    assert!(resolved.properties.is_empty());
+}
+
+// --- OpenAPI 3.1 response code variants with type arrays ---
+// Ensures all response code paths work with 3.1-specific nullable type arrays.
+
+#[test]
+fn test_31_response_201_with_type_arrays() {
+    // OpenAPI 3.1 endpoint returning 201 with type arrays in schema
+    // Real pattern: POST creation endpoints that return the created object
+    let spec_json = r#"{
+        "openapi": "3.1.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {
+            "/resources": {
+                "post": {
+                    "responses": {
+                        "201": {
+                            "description": "Created",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "id": {"type": "string", "format": "uuid"},
+                                            "name": {"type": "string"},
+                                            "description": {"type": ["string", "null"]},
+                                            "created_at": {"type": "string", "format": "date-time"}
+                                        },
+                                        "required": ["id", "name", "created_at"]
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }"#;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let endpoints = spec.get_endpoints();
+    assert_eq!(endpoints.len(), 1);
+
+    let schema = endpoints[0].response_schema.as_ref().unwrap();
+    assert!(schema.properties.contains_key("id"));
+    let desc = schema.properties.get("description").unwrap();
+    assert!(desc.nullable);
+    assert_eq!(desc.schema_type, Some("string".to_string()));
+}
+
+#[test]
+fn test_31_response_2xx_with_type_arrays() {
+    // OpenAPI 3.1 endpoint using 2XX wildcard with type arrays
+    let spec_json = r#"{
+        "openapi": "3.1.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {
+            "/items": {
+                "get": {
+                    "responses": {
+                        "2XX": {
+                            "description": "Success",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "id": {"type": "integer"},
+                                                "label": {"type": ["string", "null"]},
+                                                "value": {"type": ["number", "null"], "format": "double"}
+                                            },
+                                            "required": ["id"]
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }"#;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let endpoints = spec.get_endpoints();
+    assert_eq!(endpoints.len(), 1);
+
+    let schema = endpoints[0].response_schema.as_ref().unwrap();
+    let items = schema.items.as_ref().unwrap();
+    let label = items.properties.get("label").unwrap();
+    assert!(label.nullable);
+    assert_eq!(label.schema_type, Some("string".to_string()));
+
+    let value = items.properties.get("value").unwrap();
+    assert!(value.nullable);
+    assert_eq!(value.format, Some("double".to_string()));
+}
+
+#[test]
+fn test_31_response_default_only_with_type_arrays() {
+    // OpenAPI 3.1 endpoint with only "default" response and type arrays
+    let spec_json = r#"{
+        "openapi": "3.1.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {
+            "/status": {
+                "get": {
+                    "responses": {
+                        "default": {
+                            "description": "Default response",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "status": {"type": "string"},
+                                            "message": {"type": ["string", "null"]},
+                                            "timestamp": {"type": "integer", "format": "unix-time"}
+                                        },
+                                        "required": ["status"]
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }"#;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let endpoints = spec.get_endpoints();
+    assert_eq!(endpoints.len(), 1);
+
+    let schema = endpoints[0].response_schema.as_ref().unwrap();
+    let msg = schema.properties.get("message").unwrap();
+    assert!(msg.nullable);
+    assert_eq!(msg.schema_type, Some("string".to_string()));
+}
+
+#[test]
+fn test_31_response_priority_all_codes_with_type_arrays() {
+    // OpenAPI 3.1: 200 should be preferred over 201/2XX/default
+    // Ensures response code priority works correctly with 3.1 schemas
+    let spec_json = r#"{
+        "openapi": "3.1.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {
+            "/items": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "OK",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "from_200": {"type": ["string", "null"]}
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "201": {
+                            "description": "Created",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "from_201": {"type": "string"}
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "2XX": {
+                            "description": "Wildcard",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "from_2xx": {"type": "string"}
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "default": {
+                            "description": "Default",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "from_default": {"type": "string"}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }"#;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let endpoints = spec.get_endpoints();
+    let schema = endpoints[0].response_schema.as_ref().unwrap();
+
+    // 200 should win
+    assert!(schema.properties.contains_key("from_200"));
+    assert!(!schema.properties.contains_key("from_201"));
+    assert!(!schema.properties.contains_key("from_2xx"));
+    assert!(!schema.properties.contains_key("from_default"));
+
+    // And the 3.1 type array should be resolved
+    let field = schema.properties.get("from_200").unwrap();
+    assert!(field.nullable);
+}
+
+#[test]
+fn test_31_non_json_content_type_with_type_arrays() {
+    // OpenAPI 3.1 with non-JSON content types containing type arrays
+    // Tests GeoJSON fallback with 3.1 nullable patterns
+    let spec_json = r#"{
+        "openapi": "3.1.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {
+            "/features": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/geo+json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "type": {"type": "string"},
+                                            "bbox": {"type": ["array", "null"]},
+                                            "features": {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "id": {"type": ["string", "null"]},
+                                                        "geometry": {"type": ["object", "null"]}
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }"#;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let endpoints = spec.get_endpoints();
+    assert_eq!(endpoints.len(), 1);
+
+    let schema = endpoints[0].response_schema.as_ref().unwrap();
+    let bbox = schema.properties.get("bbox").unwrap();
+    assert!(bbox.nullable);
+    assert_eq!(bbox.schema_type, Some("array".to_string()));
+}
+
+#[test]
+fn test_31_response_ref_with_type_arrays() {
+    // OpenAPI 3.1: response-level $ref where the target schema uses type arrays
+    let spec_json = r##"{
+        "openapi": "3.1.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {
+            "/events": {
+                "get": {
+                    "responses": {
+                        "200": {"$ref": "#/components/responses/EventList"}
+                    }
+                }
+            }
+        },
+        "components": {
+            "responses": {
+                "EventList": {
+                    "description": "List of events",
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {"type": "integer"},
+                                        "type": {"type": "string"},
+                                        "actor": {"type": ["string", "null"]},
+                                        "created_at": {"type": "string", "format": "date-time"},
+                                        "payload": {"type": ["object", "null"]}
+                                    },
+                                    "required": ["id", "type", "created_at"]
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }"##;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let endpoints = spec.get_endpoints();
+    assert_eq!(endpoints.len(), 1);
+
+    let schema = endpoints[0].response_schema.as_ref().unwrap();
+    let items = schema.items.as_ref().unwrap();
+
+    let actor = items.properties.get("actor").unwrap();
+    assert!(actor.nullable);
+    assert_eq!(actor.schema_type, Some("string".to_string()));
+
+    let payload = items.properties.get("payload").unwrap();
+    assert!(payload.nullable);
+    assert_eq!(payload.schema_type, Some("object".to_string()));
+}
+
+#[test]
+fn test_31_get_post_same_path_different_schemas() {
+    // OpenAPI 3.1: same path with GET and POST returning different schemas,
+    // both using 3.1 type arrays
+    let spec_json = r#"{
+        "openapi": "3.1.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {
+            "/items": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "List items",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "id": {"type": "integer"},
+                                                "summary": {"type": ["string", "null"]}
+                                            },
+                                            "required": ["id"]
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "post": {
+                    "responses": {
+                        "201": {
+                            "description": "Created",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "id": {"type": "integer"},
+                                            "summary": {"type": ["string", "null"]},
+                                            "details": {"type": ["string", "null"]},
+                                            "created_at": {"type": "string", "format": "date-time"}
+                                        },
+                                        "required": ["id", "created_at"]
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }"#;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let endpoints = spec.get_endpoints();
+    assert_eq!(endpoints.len(), 2);
+
+    // GET comes first (alphabetically by method)
+    assert_eq!(endpoints[0].method, "GET");
+    assert_eq!(endpoints[1].method, "POST");
+
+    // GET has array response with 2 properties
+    let get_schema = endpoints[0].response_schema.as_ref().unwrap();
+    let get_items = get_schema.items.as_ref().unwrap();
+    assert_eq!(get_items.properties.len(), 2);
+
+    // POST has object response with 4 properties
+    let post_schema = endpoints[1].response_schema.as_ref().unwrap();
+    assert_eq!(post_schema.properties.len(), 4);
+    assert!(post_schema.properties.contains_key("details"));
+
+    // Table names should differ
+    assert_eq!(endpoints[0].table_name(), "items");
+    assert_eq!(endpoints[1].table_name(), "items_post");
+}

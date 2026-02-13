@@ -1122,3 +1122,828 @@ fn test_generate_all_tables_post_method_in_ddl() {
     assert!(ddl.contains("method 'POST'"), "Method option: {ddl}");
     assert!(ddl.contains("endpoint '/search'"), "Endpoint option: {ddl}");
 }
+
+// =============================================================================
+// OpenAPI 3.1 DDL generation coverage — end-to-end spec → DDL pipeline
+// =============================================================================
+
+#[test]
+fn test_extract_columns_from_oneof_nullable_properties() {
+    // oneOf merges properties as nullable — verify column extraction reflects this
+    let spec = OpenApiSpec::from_str(
+        r##"{
+        "openapi": "3.1.0",
+        "info": {"title": "Test"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "Cat": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "indoor": {"type": "boolean"}
+                    },
+                    "required": ["name"]
+                },
+                "Dog": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "breed": {"type": "string"}
+                    },
+                    "required": ["name"]
+                },
+                "Pet": {
+                    "oneOf": [
+                        {"$ref": "#/components/schemas/Cat"},
+                        {"$ref": "#/components/schemas/Dog"}
+                    ]
+                }
+            }
+        }
+    }"##,
+    )
+    .unwrap();
+
+    let pet = spec.resolve_ref("#/components/schemas/Pet").unwrap();
+    let columns = extract_columns(pet, &spec, false);
+    let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+
+    assert!(names.contains(&"name"), "Missing name in {names:?}");
+    assert!(names.contains(&"indoor"), "Missing indoor in {names:?}");
+    assert!(names.contains(&"breed"), "Missing breed in {names:?}");
+
+    // All oneOf properties should be nullable (don't know which variant)
+    for col in &columns {
+        assert!(col.nullable, "{} should be nullable in oneOf", col.name);
+    }
+}
+
+#[test]
+fn test_extract_columns_31_anyof_ref_and_null() {
+    // GitHub pattern: anyOf: [$ref, {type: "null"}] — should produce columns from the ref
+    let spec = OpenApiSpec::from_str(
+        r##"{
+        "openapi": "3.1.0",
+        "info": {"title": "Test"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "SimpleUser": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "login": {"type": "string"},
+                        "avatar_url": {"type": ["string", "null"], "format": "uri"}
+                    },
+                    "required": ["id", "login"]
+                }
+            }
+        }
+    }"##,
+    )
+    .unwrap();
+
+    // Simulate what get_response_schema returns for anyOf: [$ref, null]
+    let schema = crate::spec::Schema {
+        any_of: vec![
+            crate::spec::Schema {
+                reference: Some("#/components/schemas/SimpleUser".to_string()),
+                ..Default::default()
+            },
+            crate::spec::Schema {
+                schema_type: Some("null".to_string()),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+
+    let columns = extract_columns(&schema, &spec, false);
+    let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+
+    assert!(names.contains(&"id"), "Missing id in {names:?}");
+    assert!(names.contains(&"login"), "Missing login in {names:?}");
+    assert!(
+        names.contains(&"avatar_url"),
+        "Missing avatar_url in {names:?}"
+    );
+
+    // anyOf makes everything nullable
+    for col in &columns {
+        assert!(col.nullable, "{} should be nullable in anyOf", col.name);
+    }
+
+    // avatar_url gets format: "uri" → text (not a special PG type for uri)
+    let avatar = columns.iter().find(|c| c.name == "avatar_url").unwrap();
+    assert_eq!(avatar.pg_type, "text");
+}
+
+#[test]
+fn test_full_ddl_31_anyof_nullable_ref_pattern() {
+    // End-to-end: 3.1 spec with GitHub-style anyOf nullable ref → correct DDL
+    let spec = OpenApiSpec::from_str(
+        r##"{
+        "openapi": "3.1.0",
+        "info": {"title": "GitHub-style API", "version": "1.0"},
+        "paths": {
+            "/repos": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "id": {"type": "integer"},
+                                                "name": {"type": "string"},
+                                                "owner": {
+                                                    "anyOf": [
+                                                        {"$ref": "#/components/schemas/SimpleUser"},
+                                                        {"type": "null"}
+                                                    ]
+                                                },
+                                                "description": {"type": ["string", "null"]},
+                                                "created_at": {"type": "string", "format": "date-time"}
+                                            },
+                                            "required": ["id", "name"]
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "components": {
+            "schemas": {
+                "SimpleUser": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "login": {"type": "string"}
+                    },
+                    "required": ["id", "login"]
+                }
+            }
+        }
+    }"##,
+    )
+    .unwrap();
+
+    let tables = generate_all_tables(&spec, "github_server", None, false, true);
+    assert_eq!(tables.len(), 1);
+    let ddl = &tables[0];
+
+    // id and name are required, not nullable
+    assert!(ddl.contains("\"id\" bigint NOT NULL"), "id: {ddl}");
+    assert!(ddl.contains("\"name\" text NOT NULL"), "name: {ddl}");
+    // created_at is not required → nullable
+    assert!(
+        ddl.contains("\"created_at\" timestamptz"),
+        "created_at: {ddl}"
+    );
+    assert!(
+        !ddl.contains("\"created_at\" timestamptz NOT NULL"),
+        "created_at should be nullable: {ddl}"
+    );
+    // description is nullable via type array
+    assert!(ddl.contains("\"description\" text"), "description: {ddl}");
+    assert!(
+        !ddl.contains("\"description\" text NOT NULL"),
+        "description should be nullable: {ddl}"
+    );
+    // owner is anyOf → jsonb (merged from oneOf/anyOf without type)
+    assert!(
+        ddl.contains("\"owner\" jsonb"),
+        "owner should be jsonb: {ddl}"
+    );
+    // attrs column
+    assert!(ddl.contains("\"attrs\" jsonb"), "attrs: {ddl}");
+    // rowid should be id
+    assert!(ddl.contains("rowid_column 'id'"), "rowid: {ddl}");
+}
+
+#[test]
+fn test_full_ddl_31_allof_inheritance_chain() {
+    // End-to-end: allOf inheritance with 3.1 type arrays → correct DDL
+    let spec = OpenApiSpec::from_str(
+        r##"{
+        "openapi": "3.1.0",
+        "info": {"title": "Inheritance API", "version": "1.0"},
+        "paths": {
+            "/tickets": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "array",
+                                        "items": {"$ref": "#/components/schemas/Ticket"}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "components": {
+            "schemas": {
+                "BaseEntity": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "format": "uuid"},
+                        "created_at": {"type": "string", "format": "date-time"},
+                        "updated_at": {"type": ["string", "null"], "format": "date-time"}
+                    },
+                    "required": ["id", "created_at"]
+                },
+                "Ticket": {
+                    "allOf": [
+                        {"$ref": "#/components/schemas/BaseEntity"},
+                        {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string"},
+                                "priority": {"type": ["integer", "null"], "format": "int32"},
+                                "assignee": {"type": ["string", "null"]}
+                            },
+                            "required": ["title"]
+                        }
+                    ]
+                }
+            }
+        }
+    }"##,
+    )
+    .unwrap();
+
+    let tables = generate_all_tables(&spec, "api_server", None, false, false);
+    assert_eq!(tables.len(), 1);
+    let ddl = &tables[0];
+
+    // From BaseEntity: id (uuid, required), created_at (timestamptz, required), updated_at (nullable)
+    assert!(ddl.contains("\"id\" uuid NOT NULL"), "id: {ddl}");
+    assert!(
+        ddl.contains("\"created_at\" timestamptz NOT NULL"),
+        "created_at: {ddl}"
+    );
+    assert!(
+        ddl.contains("\"updated_at\" timestamptz"),
+        "updated_at: {ddl}"
+    );
+    assert!(
+        !ddl.contains("\"updated_at\" timestamptz NOT NULL"),
+        "updated_at should be nullable: {ddl}"
+    );
+
+    // From Ticket extension: title (required), priority (nullable int32), assignee (nullable)
+    assert!(ddl.contains("\"title\" text NOT NULL"), "title: {ddl}");
+    assert!(ddl.contains("\"priority\" integer"), "priority: {ddl}");
+    assert!(
+        !ddl.contains("\"priority\" integer NOT NULL"),
+        "priority should be nullable: {ddl}"
+    );
+    assert!(ddl.contains("\"assignee\" text"), "assignee: {ddl}");
+    assert!(
+        !ddl.contains("\"assignee\" text NOT NULL"),
+        "assignee should be nullable: {ddl}"
+    );
+
+    // rowid should be id
+    assert!(ddl.contains("rowid_column 'id'"), "rowid: {ddl}");
+}
+
+#[test]
+fn test_generate_all_tables_31_spec_with_type_arrays() {
+    // generate_all_tables with a full 3.1 spec — multiple endpoints
+    let spec = OpenApiSpec::from_str(
+        r#"{
+        "openapi": "3.1.0",
+        "info": {"title": "3.1 API", "version": "1.0"},
+        "paths": {
+            "/users": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "id": {"type": "integer"},
+                                                "email": {"type": ["string", "null"]}
+                                            },
+                                            "required": ["id"]
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "/events": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "id": {"type": "string", "format": "uuid"},
+                                                "occurred_at": {"type": "string", "format": "date-time"},
+                                                "payload": {"type": ["object", "null"]}
+                                            },
+                                            "required": ["id", "occurred_at"]
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }"#,
+    )
+    .unwrap();
+
+    let tables = generate_all_tables(&spec, "api31", None, false, true);
+    assert_eq!(tables.len(), 2);
+
+    // Find the users table
+    let users_ddl = tables.iter().find(|t| t.contains("\"users\"")).unwrap();
+    assert!(
+        users_ddl.contains("\"id\" bigint NOT NULL"),
+        "users.id: {users_ddl}"
+    );
+    assert!(
+        users_ddl.contains("\"email\" text"),
+        "users.email: {users_ddl}"
+    );
+    assert!(
+        !users_ddl.contains("\"email\" text NOT NULL"),
+        "users.email nullable: {users_ddl}"
+    );
+
+    // Find the events table
+    let events_ddl = tables.iter().find(|t| t.contains("\"events\"")).unwrap();
+    assert!(
+        events_ddl.contains("\"id\" uuid NOT NULL"),
+        "events.id: {events_ddl}"
+    );
+    assert!(
+        events_ddl.contains("\"occurred_at\" timestamptz NOT NULL"),
+        "events.occurred_at: {events_ddl}"
+    );
+    assert!(
+        events_ddl.contains("\"payload\" jsonb"),
+        "events.payload: {events_ddl}"
+    );
+    assert!(
+        !events_ddl.contains("\"payload\" jsonb NOT NULL"),
+        "events.payload nullable: {events_ddl}"
+    );
+}
+
+#[test]
+fn test_extract_columns_31_all_nullable_format_types() {
+    // Every format type mapped through 3.1 nullable type arrays
+    let spec = OpenApiSpec::from_str(
+        r#"{
+        "openapi": "3.1.0",
+        "info": {"title": "T"},
+        "paths": {}
+    }"#,
+    )
+    .unwrap();
+
+    let mut properties = HashMap::new();
+    // string formats
+    properties.insert(
+        "date_field".to_string(),
+        crate::spec::Schema {
+            schema_type: Some("string".to_string()),
+            format: Some("date".to_string()),
+            nullable: true, // from type: ["string", "null"]
+            ..Default::default()
+        },
+    );
+    properties.insert(
+        "datetime_field".to_string(),
+        crate::spec::Schema {
+            schema_type: Some("string".to_string()),
+            format: Some("date-time".to_string()),
+            nullable: true,
+            ..Default::default()
+        },
+    );
+    properties.insert(
+        "time_field".to_string(),
+        crate::spec::Schema {
+            schema_type: Some("string".to_string()),
+            format: Some("time".to_string()),
+            nullable: true,
+            ..Default::default()
+        },
+    );
+    properties.insert(
+        "uuid_field".to_string(),
+        crate::spec::Schema {
+            schema_type: Some("string".to_string()),
+            format: Some("uuid".to_string()),
+            nullable: true,
+            ..Default::default()
+        },
+    );
+    properties.insert(
+        "byte_field".to_string(),
+        crate::spec::Schema {
+            schema_type: Some("string".to_string()),
+            format: Some("byte".to_string()),
+            nullable: true,
+            ..Default::default()
+        },
+    );
+    properties.insert(
+        "binary_field".to_string(),
+        crate::spec::Schema {
+            schema_type: Some("string".to_string()),
+            format: Some("binary".to_string()),
+            nullable: true,
+            ..Default::default()
+        },
+    );
+    // integer formats
+    properties.insert(
+        "int32_field".to_string(),
+        crate::spec::Schema {
+            schema_type: Some("integer".to_string()),
+            format: Some("int32".to_string()),
+            nullable: true,
+            ..Default::default()
+        },
+    );
+    properties.insert(
+        "int64_field".to_string(),
+        crate::spec::Schema {
+            schema_type: Some("integer".to_string()),
+            format: Some("int64".to_string()),
+            nullable: true,
+            ..Default::default()
+        },
+    );
+    properties.insert(
+        "unix_time_field".to_string(),
+        crate::spec::Schema {
+            schema_type: Some("integer".to_string()),
+            format: Some("unix-time".to_string()),
+            nullable: true,
+            ..Default::default()
+        },
+    );
+    // number formats
+    properties.insert(
+        "float_field".to_string(),
+        crate::spec::Schema {
+            schema_type: Some("number".to_string()),
+            format: Some("float".to_string()),
+            nullable: true,
+            ..Default::default()
+        },
+    );
+    properties.insert(
+        "double_field".to_string(),
+        crate::spec::Schema {
+            schema_type: Some("number".to_string()),
+            format: Some("double".to_string()),
+            nullable: true,
+            ..Default::default()
+        },
+    );
+    // boolean
+    properties.insert(
+        "bool_field".to_string(),
+        crate::spec::Schema {
+            schema_type: Some("boolean".to_string()),
+            nullable: true,
+            ..Default::default()
+        },
+    );
+
+    let schema = crate::spec::Schema {
+        schema_type: Some("object".to_string()),
+        properties,
+        // None required — all optional
+        ..Default::default()
+    };
+
+    let columns = extract_columns(&schema, &spec, false);
+
+    let expected = vec![
+        ("binary_field", "bytea"),
+        ("bool_field", "boolean"),
+        ("byte_field", "bytea"),
+        ("date_field", "date"),
+        ("datetime_field", "timestamptz"),
+        ("double_field", "double precision"),
+        ("float_field", "real"),
+        ("int32_field", "integer"),
+        ("int64_field", "bigint"),
+        ("time_field", "time"),
+        ("unix_time_field", "timestamptz"),
+        ("uuid_field", "uuid"),
+    ];
+
+    for (name, pg_type) in &expected {
+        let col = columns
+            .iter()
+            .find(|c| c.name == *name)
+            .unwrap_or_else(|| panic!("Missing column {name}"));
+        assert_eq!(col.pg_type, *pg_type, "{name} should be {pg_type}");
+        assert!(col.nullable, "{name} should be nullable");
+    }
+}
+
+#[test]
+fn test_full_ddl_31_stripe_expandable_field() {
+    // Stripe pattern: anyOf [string, $ref] for expandable fields → produces jsonb in DDL
+    let spec = OpenApiSpec::from_str(
+        r##"{
+        "openapi": "3.1.0",
+        "info": {"title": "Stripe-style API", "version": "1.0"},
+        "paths": {
+            "/charges": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "data": {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "id": {"type": "string"},
+                                                        "amount": {"type": "integer"},
+                                                        "customer": {
+                                                            "anyOf": [
+                                                                {"type": "string"},
+                                                                {"$ref": "#/components/schemas/Customer"}
+                                                            ]
+                                                        },
+                                                        "currency": {"type": "string"},
+                                                        "created": {"type": "integer", "format": "unix-time"}
+                                                    },
+                                                    "required": ["id", "amount", "currency", "created"]
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "components": {
+            "schemas": {
+                "Customer": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "email": {"type": ["string", "null"]}
+                    }
+                }
+            }
+        }
+    }"##,
+    )
+    .unwrap();
+
+    let tables = generate_all_tables(&spec, "stripe_server", None, false, false);
+    assert_eq!(tables.len(), 1);
+    let ddl = &tables[0];
+
+    // The response is an object with a "data" array — extract_columns sees the top-level object,
+    // which has a "data" property of type array → jsonb column
+    // This verifies that wrapper objects don't get their inner items extracted at DDL time
+    // (that's a runtime concern handled by extract_data auto-detection)
+    assert!(ddl.contains("\"data\" jsonb"), "data wrapper: {ddl}");
+}
+
+#[test]
+fn test_full_ddl_31_response_level_ref() {
+    // Response-level $ref with 3.1 type arrays in the referenced response schema
+    let spec = OpenApiSpec::from_str(
+        r##"{
+        "openapi": "3.1.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "paths": {
+            "/items": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "$ref": "#/components/responses/ItemList"
+                        }
+                    }
+                }
+            }
+        },
+        "components": {
+            "responses": {
+                "ItemList": {
+                    "description": "List of items",
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {"type": "string", "format": "uuid"},
+                                        "label": {"type": ["string", "null"]},
+                                        "weight": {"type": ["number", "null"], "format": "float"},
+                                        "active": {"type": ["boolean", "null"]}
+                                    },
+                                    "required": ["id"]
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }"##,
+    )
+    .unwrap();
+
+    let tables = generate_all_tables(&spec, "test_server", None, false, false);
+    assert_eq!(tables.len(), 1);
+    let ddl = &tables[0];
+
+    assert!(ddl.contains("\"id\" uuid NOT NULL"), "id: {ddl}");
+    assert!(ddl.contains("\"label\" text"), "label: {ddl}");
+    assert!(
+        !ddl.contains("\"label\" text NOT NULL"),
+        "label nullable: {ddl}"
+    );
+    assert!(ddl.contains("\"weight\" real"), "weight: {ddl}");
+    assert!(
+        !ddl.contains("\"weight\" real NOT NULL"),
+        "weight nullable: {ddl}"
+    );
+    assert!(ddl.contains("\"active\" boolean"), "active: {ddl}");
+    assert!(
+        !ddl.contains("\"active\" boolean NOT NULL"),
+        "active nullable: {ddl}"
+    );
+}
+
+#[test]
+fn test_extract_columns_31_writeonly_excluded_with_type_arrays() {
+    // writeOnly with 3.1 type arrays — should still be filtered
+    let spec =
+        OpenApiSpec::from_str(r#"{"openapi": "3.1.0", "info": {"title": "T"}, "paths": {}}"#)
+            .unwrap();
+
+    let mut properties = HashMap::new();
+    properties.insert(
+        "username".to_string(),
+        crate::spec::Schema {
+            schema_type: Some("string".to_string()),
+            ..Default::default()
+        },
+    );
+    properties.insert(
+        "password".to_string(),
+        crate::spec::Schema {
+            schema_type: Some("string".to_string()),
+            nullable: true, // type: ["string", "null"]
+            write_only: true,
+            ..Default::default()
+        },
+    );
+    properties.insert(
+        "api_key".to_string(),
+        crate::spec::Schema {
+            schema_type: Some("string".to_string()),
+            write_only: true,
+            ..Default::default()
+        },
+    );
+
+    let schema = crate::spec::Schema {
+        schema_type: Some("object".to_string()),
+        properties,
+        ..Default::default()
+    };
+
+    let columns = extract_columns(&schema, &spec, false);
+    let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, vec!["username"]);
+}
+
+#[test]
+fn test_full_ddl_31_post_for_read_with_composition() {
+    // POST-for-read endpoint with allOf response in 3.1
+    let spec = OpenApiSpec::from_str(
+        r##"{
+        "openapi": "3.1.0",
+        "info": {"title": "Search API", "version": "1.0"},
+        "paths": {
+            "/search": {
+                "post": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "array",
+                                        "items": {
+                                            "allOf": [
+                                                {"$ref": "#/components/schemas/BaseResult"},
+                                                {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "relevance": {"type": ["number", "null"], "format": "float"},
+                                                        "snippet": {"type": ["string", "null"]}
+                                                    }
+                                                }
+                                            ]
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "components": {
+            "schemas": {
+                "BaseResult": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "title": {"type": "string"},
+                        "created_at": {"type": "string", "format": "date-time"}
+                    },
+                    "required": ["id", "title"]
+                }
+            }
+        }
+    }"##,
+    )
+    .unwrap();
+
+    let tables = generate_all_tables(&spec, "search_server", None, false, false);
+    assert_eq!(tables.len(), 1);
+    let ddl = &tables[0];
+
+    // POST table name
+    assert!(ddl.contains("\"search_post\""), "table name: {ddl}");
+    assert!(ddl.contains("method 'POST'"), "method: {ddl}");
+
+    // Base fields from allOf
+    assert!(ddl.contains("\"id\" text NOT NULL"), "id: {ddl}");
+    assert!(ddl.contains("\"title\" text NOT NULL"), "title: {ddl}");
+    assert!(
+        ddl.contains("\"created_at\" timestamptz"),
+        "created_at: {ddl}"
+    );
+
+    // Extension fields — nullable via 3.1 type arrays
+    assert!(ddl.contains("\"relevance\" real"), "relevance: {ddl}");
+    assert!(
+        !ddl.contains("\"relevance\" real NOT NULL"),
+        "relevance nullable: {ddl}"
+    );
+    assert!(ddl.contains("\"snippet\" text"), "snippet: {ddl}");
+    assert!(
+        !ddl.contains("\"snippet\" text NOT NULL"),
+        "snippet nullable: {ddl}"
+    );
+}
