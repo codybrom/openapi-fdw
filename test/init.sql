@@ -740,6 +740,38 @@ create foreign table mock_search_post (
   );
 
 -- ============================================================
+-- Bug regression tests: sticky config, re_scan
+-- ============================================================
+
+-- Bug 2: Table with custom page_size override (server default is 10)
+-- Sends limit=5 — MockServer expectation requires exactly limit=5
+create foreign table mock_config_custom_page (
+  id bigint,
+  value text,
+  attrs jsonb
+)
+  server mock_server
+  options (
+    endpoint '/config-test-custom',
+    rowid_column 'id',
+    page_size '5'
+  );
+
+-- Bug 2: Table WITHOUT page_size override (should use server default 10)
+-- Sends limit=10 — MockServer expectation requires exactly limit=10
+-- If sticky bug exists: would send limit=5 (leaked from previous scan) → no match → error
+create foreign table mock_config_default_page (
+  id bigint,
+  value text,
+  attrs jsonb
+)
+  server mock_server
+  options (
+    endpoint '/config-test-default',
+    rowid_column 'id'
+  );
+
+-- ============================================================
 -- OpenAPI spec-driven server (comprehensive custom spec)
 -- Tables are created dynamically via IMPORT FOREIGN SCHEMA in run.sh
 -- ============================================================

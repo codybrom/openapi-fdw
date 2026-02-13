@@ -216,6 +216,9 @@ impl Guest for OpenApiFdw {
             .get("debug_timing")
             .is_some_and(|v| v == "true" || v == "1");
 
+        // Save server-level pagination defaults for restoration in begin_scan
+        this.config.save_pagination_defaults();
+
         stats::inc_stats(FDW_NAME, stats::Metric::CreateTimes, 1);
 
         Ok(())
@@ -240,6 +243,9 @@ impl Guest for OpenApiFdw {
         this.response_path = opts.get("response_path");
         this.object_path = opts.get("object_path"); // e.g., "/properties" for GeoJSON
         this.cursor_path = opts.require_or("cursor_path", "");
+
+        // Restore server-level pagination defaults before applying table overrides
+        this.config.restore_pagination_defaults();
 
         // Override pagination params if specified at table level
         if let Some(param) = opts.get("cursor_param") {
@@ -365,7 +371,9 @@ impl Guest for OpenApiFdw {
         let this = Self::this_mut();
         this.pagination.reset();
         this.consumed_row_cnt = 0;
-        this.make_request(ctx)
+        this.make_request(ctx)?;
+        this.pagination.record_first_page();
+        Ok(())
     }
 
     fn end_scan(_ctx: &Context) -> FdwResult {

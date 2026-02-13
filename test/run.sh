@@ -92,8 +92,8 @@ docker compose -f test/docker-compose.yml down -v 2>/dev/null || true
 docker compose -f test/docker-compose.yml up -d
 
 echo "Waiting for MockServer..."
-for i in $(seq 1 30); do
-  if curl -sf http://localhost:1080/mockserver/status > /dev/null 2>&1; then
+for i in $(seq 1 60); do
+  if curl -sf --max-time 2 http://localhost:1080/mockserver/status > /dev/null 2>&1; then
     echo "MockServer ready after ${i}s"
     break
   fi
@@ -362,6 +362,17 @@ run_count_test "Test 24: Relative URL pagination — all pages" \
 run_test "Test 24b: Relative URL data verification" \
   "SELECT id, label FROM mock_relative_paged;" \
   "rel2"
+
+# Table-level page_size isolation: query table with override first, then server default.
+# MockServer expectations require exact limit= values — if config leaks between scans,
+# the second query gets no matching expectation and fails.
+run_test "Test 47: Table-level page_size override (limit=5)" \
+  "SELECT id, value FROM mock_config_custom_page;" \
+  "custom-page-size"
+
+run_test "Test 48: Server default page_size restored after override (limit=10)" \
+  "SELECT id, value FROM mock_config_default_page;" \
+  "server-default-size"
 
 # ---- URL Construction Tests ----
 

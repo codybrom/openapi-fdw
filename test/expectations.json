@@ -846,5 +846,51 @@
         "json": "{\"@context\":[\"https://geojson.org/geojson-ld/geojson-context.jsonld\"],\"type\":\"FeatureCollection\",\"features\":[{\"type\":\"Feature\",\"properties\":{\"@id\":\"https://api.weather.gov/stations/KDEN\",\"@type\":\"wx:ObservationStation\",\"stationIdentifier\":\"KDEN\",\"name\":\"Denver International\",\"timeZone\":\"America/Denver\"}},{\"type\":\"Feature\",\"properties\":{\"@id\":\"https://api.weather.gov/stations/KLAX\",\"@type\":\"wx:ObservationStation\",\"stationIdentifier\":\"KLAX\",\"name\":\"Los Angeles International\",\"timeZone\":\"America/Los_Angeles\"}}]}"
       }
     }
+  },
+  {
+    "httpRequest": {
+      "method": "GET",
+      "path": "/config-test-custom",
+      "queryStringParameters": {
+        "limit": [
+          "5"
+        ]
+      }
+    },
+    "httpResponse": {
+      "statusCode": 200,
+      "headers": {
+        "content-type": [
+          "application/json"
+        ]
+      },
+      "body": {
+        "type": "JSON",
+        "json": "[{\"id\":1,\"value\":\"custom-page-size\"}]"
+      }
+    }
+  },
+  {
+    "httpRequest": {
+      "method": "GET",
+      "path": "/config-test-default",
+      "queryStringParameters": {
+        "limit": [
+          "10"
+        ]
+      }
+    },
+    "httpResponse": {
+      "statusCode": 200,
+      "headers": {
+        "content-type": [
+          "application/json"
+        ]
+      },
+      "body": {
+        "type": "JSON",
+        "json": "[{\"id\":1,\"value\":\"server-default-size\"}]"
+      }
+    }
   }
 ]

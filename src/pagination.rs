@@ -59,10 +59,12 @@ impl PaginationState {
     }
 
     /// Record the first page after initial `make_request` in `begin_scan`.
+    ///
+    /// Only sets `pages_fetched = 1`. Does NOT copy `next_cursor`/`next_url`
+    /// into `prev_*` — there was no cursor sent for the first page, so `prev_*`
+    /// must stay `None` to avoid a false-positive loop detection.
     pub(crate) fn record_first_page(&mut self) {
         self.pages_fetched = 1;
-        self.prev_cursor.clone_from(&self.next_cursor);
-        self.prev_url.clone_from(&self.next_url);
     }
 
     /// Clear next-page pointers (e.g., on 404 or empty response).

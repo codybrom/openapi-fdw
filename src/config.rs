@@ -7,11 +7,12 @@ use crate::bindings::supabase::wrappers::{
     utils,
 };
 
-/// Immutable server-level configuration.
+/// Server-level configuration.
 ///
-/// Fields are set once in `init()` from server options and remain constant
-/// for the FDW lifetime. A few fields (`page_size`, `page_size_param`,
-/// `cursor_param`) can be overridden per-table in `begin_scan`.
+/// Fields are set once in `init()` from server options. A few fields
+/// (`page_size`, `page_size_param`, `cursor_param`) can be overridden
+/// per-table in `begin_scan`; call `save_pagination_defaults()` after
+/// init and `restore_pagination_defaults()` at the start of each scan.
 #[derive(Debug)]
 pub(crate) struct ServerConfig {
     pub(crate) base_url: String,
@@ -25,6 +26,11 @@ pub(crate) struct ServerConfig {
     pub(crate) max_pages: usize,
     pub(crate) max_response_bytes: usize,
     pub(crate) debug_timing: bool,
+
+    // Server-level defaults (saved after init, restored in begin_scan)
+    pub(crate) default_page_size: usize,
+    pub(crate) default_page_size_param: String,
+    pub(crate) default_cursor_param: String,
 }
 
 impl Default for ServerConfig {
@@ -41,11 +47,34 @@ impl Default for ServerConfig {
             max_pages: 1000,
             max_response_bytes: 50 * 1024 * 1024, // 50 MiB
             debug_timing: false,
+            default_page_size: 0,
+            default_page_size_param: String::new(),
+            default_cursor_param: String::new(),
         }
     }
 }
 
 impl ServerConfig {
+    /// Snapshot the current pagination fields as server-level defaults.
+    ///
+    /// Call once at the end of `init()`, after server options are parsed.
+    pub(crate) fn save_pagination_defaults(&mut self) {
+        self.default_page_size = self.page_size;
+        self.default_page_size_param
+            .clone_from(&self.page_size_param);
+        self.default_cursor_param.clone_from(&self.cursor_param);
+    }
+
+    /// Restore pagination fields to server-level defaults.
+    ///
+    /// Call at the start of each `begin_scan()`, before applying table-level overrides.
+    pub(crate) fn restore_pagination_defaults(&mut self) {
+        self.page_size = self.default_page_size;
+        self.page_size_param
+            .clone_from(&self.default_page_size_param);
+        self.cursor_param.clone_from(&self.default_cursor_param);
+    }
+
     /// Configure request headers from server options
     pub(crate) fn configure_headers(&mut self, opts: &Options) -> FdwResult {
         self.headers
