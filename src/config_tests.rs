@@ -48,10 +48,12 @@ fn test_default_include_attrs_off() {
 
 #[test]
 fn test_save_and_restore_pagination_defaults() {
-    let mut config = ServerConfig::default();
-    config.page_size = 50;
-    config.page_size_param = "per_page".to_string();
-    config.cursor_param = "cursor".to_string();
+    let mut config = ServerConfig {
+        page_size: 50,
+        page_size_param: "per_page".to_string(),
+        cursor_param: "cursor".to_string(),
+        ..Default::default()
+    };
     config.save_pagination_defaults();
 
     // Override with table-level values
@@ -68,9 +70,11 @@ fn test_save_and_restore_pagination_defaults() {
 
 #[test]
 fn test_restore_before_save_uses_default_zeros() {
-    let mut config = ServerConfig::default();
-    config.page_size = 100;
-    config.page_size_param = "limit".to_string();
+    let mut config = ServerConfig {
+        page_size: 100,
+        page_size_param: "limit".to_string(),
+        ..Default::default()
+    };
 
     // Restore without save → restores to Default::default() values
     config.restore_pagination_defaults();
@@ -81,10 +85,12 @@ fn test_restore_before_save_uses_default_zeros() {
 
 #[test]
 fn test_save_pagination_defaults_idempotent() {
-    let mut config = ServerConfig::default();
-    config.page_size = 25;
-    config.page_size_param = "limit".to_string();
-    config.cursor_param = "after".to_string();
+    let mut config = ServerConfig {
+        page_size: 25,
+        page_size_param: "limit".to_string(),
+        cursor_param: "after".to_string(),
+        ..Default::default()
+    };
 
     config.save_pagination_defaults();
     config.save_pagination_defaults(); // Second save should be same
@@ -96,10 +102,12 @@ fn test_save_pagination_defaults_idempotent() {
 
 #[test]
 fn test_multiple_save_restore_cycles() {
-    let mut config = ServerConfig::default();
-    config.page_size = 10;
-    config.page_size_param = "limit".to_string();
-    config.cursor_param = "after".to_string();
+    let mut config = ServerConfig {
+        page_size: 10,
+        page_size_param: "limit".to_string(),
+        cursor_param: "after".to_string(),
+        ..Default::default()
+    };
     config.save_pagination_defaults();
 
     // Cycle 1: override and restore
@@ -119,11 +127,13 @@ fn test_multiple_save_restore_cycles() {
 
 #[test]
 fn test_restore_does_not_affect_non_pagination_fields() {
-    let mut config = ServerConfig::default();
-    config.base_url = "https://api.example.com".to_string();
-    config.max_pages = 500;
-    config.debug_timing = true;
-    config.page_size = 25;
+    let mut config = ServerConfig {
+        base_url: "https://api.example.com".to_string(),
+        max_pages: 500,
+        debug_timing: true,
+        page_size: 25,
+        ..Default::default()
+    };
     config.save_pagination_defaults();
 
     config.base_url = "https://other.example.com".to_string();

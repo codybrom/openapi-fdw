@@ -406,10 +406,12 @@ fn test_token_as_url() {
 
 #[test]
 fn test_full_pagination_lifecycle_cursor() {
-    let mut state = PaginationState::default();
+    let mut state = PaginationState {
+        next: Some(PaginationToken::Cursor("cursor_1".to_string())),
+        ..Default::default()
+    };
 
     // After begin_scan: API returns first page with cursor
-    state.next = Some(PaginationToken::Cursor("cursor_1".to_string()));
     state.record_first_page();
     assert_eq!(state.pages_fetched, 1);
     assert!(!state.is_exhausted());
@@ -448,12 +450,14 @@ fn test_full_pagination_lifecycle_cursor() {
 
 #[test]
 fn test_full_pagination_lifecycle_url() {
-    let mut state = PaginationState::default();
+    let mut state = PaginationState {
+        next: Some(PaginationToken::Url(
+            "https://api.example.com/items?page=2".to_string(),
+        )),
+        ..Default::default()
+    };
 
     // First page: API returns next URL
-    state.next = Some(PaginationToken::Url(
-        "https://api.example.com/items?page=2".to_string(),
-    ));
     state.record_first_page();
     assert!(!state.is_exhausted());
     assert!(state.detect_loop().is_none());
@@ -502,9 +506,10 @@ fn test_page_limit_enforcement_in_lifecycle() {
 
 #[test]
 fn test_clear_next_after_404() {
-    let mut state = PaginationState::default();
-
-    state.next = Some(PaginationToken::Cursor("c1".to_string()));
+    let mut state = PaginationState {
+        next: Some(PaginationToken::Cursor("c1".to_string())),
+        ..Default::default()
+    };
     state.record_first_page();
     state.advance();
 
