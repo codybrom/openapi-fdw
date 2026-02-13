@@ -193,7 +193,7 @@ impl OpenApiFdw {
 
             let spec_json: JsonValue =
                 serde_json::from_str(&resp.body).map_err(|e| e.to_string())?;
-            self.spec = Some(OpenApiSpec::from_json(&spec_json)?);
+            self.spec = Some(OpenApiSpec::from_json(spec_json)?);
 
             // Use base_url from spec if not explicitly set
             if self.base_url.is_empty() {
