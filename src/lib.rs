@@ -109,6 +109,9 @@ struct OpenApiFdw {
     src_limit: Option<i64>,
     consumed_row_cnt: i64,
 
+    // Safety limits
+    max_response_bytes: usize,
+
     // Debug logging (enabled via server option debug_timing = 'true')
     debug_timing: bool,
     scan_row_count: i64,
@@ -142,6 +145,7 @@ impl Default for OpenApiFdw {
             column_key_map: Vec::new(),
             src_limit: None,
             consumed_row_cnt: 0,
+            max_response_bytes: 50 * 1024 * 1024, // 50 MiB
             debug_timing: false,
             scan_row_count: 0,
         }
@@ -192,6 +196,15 @@ impl OpenApiFdw {
             let resp = http::get(&req)?;
             http::error_for_status(&resp)
                 .map_err(|err| format!("Failed to fetch OpenAPI spec: {}: {}", err, resp.body))?;
+
+            if resp.body.len() > self.max_response_bytes {
+                return Err(format!(
+                    "OpenAPI spec too large: {} bytes (limit: {} bytes). \
+                     Increase max_response_bytes server option if needed.",
+                    resp.body.len(),
+                    self.max_response_bytes
+                ));
+            }
 
             let spec_json: JsonValue =
                 serde_json::from_str(&resp.body).map_err(|e| e.to_string())?;
@@ -535,6 +548,15 @@ impl OpenApiFdw {
         }
 
         http::error_for_status(&resp).map_err(|err| format!("{}: {}", err, resp.body))?;
+
+        if resp.body.len() > self.max_response_bytes {
+            return Err(format!(
+                "Response body too large: {} bytes (limit: {} bytes). \
+                 Increase max_response_bytes server option if needed.",
+                resp.body.len(),
+                self.max_response_bytes
+            ));
+        }
 
         let mut resp_json: JsonValue =
             serde_json::from_str(&resp.body).map_err(|e| e.to_string())?;
@@ -1069,6 +1091,13 @@ impl Guest for OpenApiFdw {
 
         this.page_size_param = opts.require_or("page_size_param", "limit");
         this.cursor_param = opts.require_or("cursor_param", "after");
+
+        // Maximum response body size (default 50 MiB)
+        if let Some(s) = opts.get("max_response_bytes") {
+            this.max_response_bytes = s
+                .parse()
+                .map_err(|_| format!("Invalid value for 'max_response_bytes': '{s}'"))?;
+        }
 
         // Debug timing: emit per-scan timing via NOTICE when enabled
         this.debug_timing = opts

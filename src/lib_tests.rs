@@ -1876,3 +1876,11 @@ fn test_retry_backoff_cap() {
     let delay = backoff.min(max_delay);
     assert_eq!(delay, 30_000);
 }
+
+// --- Response size limit tests ---
+
+#[test]
+fn test_max_response_bytes_default() {
+    let fdw = OpenApiFdw::default();
+    assert_eq!(fdw.max_response_bytes, 50 * 1024 * 1024); // 50 MiB
+}
