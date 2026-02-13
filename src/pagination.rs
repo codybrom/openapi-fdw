@@ -1,46 +1,70 @@
 //! Pagination state tracking and loop detection
 
+/// A pagination token: either a cursor string or a full/partial URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PaginationToken {
+    /// Token-based pagination (e.g., Stripe `next_cursor`)
+    Cursor(String),
+    /// Link-based pagination (e.g., GitHub `Link` header, HAL `_links`)
+    Url(String),
+}
+
+impl PaginationToken {
+    /// Returns the inner cursor string, or `None` if this is a URL.
+    pub(crate) fn as_cursor(&self) -> Option<&str> {
+        match self {
+            Self::Cursor(s) => Some(s),
+            Self::Url(_) => None,
+        }
+    }
+
+    /// Returns the inner URL string, or `None` if this is a cursor.
+    pub(crate) fn as_url(&self) -> Option<&str> {
+        match self {
+            Self::Url(s) => Some(s),
+            Self::Cursor(_) => None,
+        }
+    }
+}
+
 /// Tracks pagination state across pages within a single scan.
 ///
-/// Detects infinite loops (duplicate cursor/URL) and enforces page limits.
+/// Detects infinite loops (duplicate token) and enforces page limits.
 #[derive(Debug, Default)]
 pub(crate) struct PaginationState {
-    /// Cursor value for the next page (token-based pagination)
-    pub(crate) next_cursor: Option<String>,
-    /// Full or partial URL for the next page (link-based pagination)
-    pub(crate) next_url: Option<String>,
-
-    // Loop detection
-    pub(crate) prev_cursor: Option<String>,
-    pub(crate) prev_url: Option<String>,
+    /// Token for the next page (cursor or URL)
+    pub(crate) next: Option<PaginationToken>,
+    /// Token from the previous page (for loop detection)
+    pub(crate) previous: Option<PaginationToken>,
+    /// Number of pages fetched so far
     pub(crate) pages_fetched: usize,
 }
 
 impl PaginationState {
     /// Reset all pagination state for a new scan.
     pub(crate) fn reset(&mut self) {
-        self.next_cursor = None;
-        self.next_url = None;
-        self.prev_cursor = None;
-        self.prev_url = None;
+        self.next = None;
+        self.previous = None;
         self.pages_fetched = 0;
     }
 
     /// Returns `true` when there are no more pages to fetch.
     pub(crate) fn is_exhausted(&self) -> bool {
-        self.next_cursor.is_none() && self.next_url.is_none()
+        self.next.is_none()
     }
 
-    /// Detect a pagination loop (duplicate cursor or URL).
+    /// Detect a pagination loop (duplicate token).
     ///
     /// Returns a human-readable reason if a loop is detected.
     pub(crate) fn detect_loop(&self) -> Option<&'static str> {
-        if self.next_cursor.is_some() && self.next_cursor == self.prev_cursor {
-            Some("duplicate cursor detected (possible infinite loop)")
-        } else if self.next_url.is_some() && self.next_url == self.prev_url {
-            Some("duplicate URL detected (possible infinite loop)")
-        } else {
-            None
+        match (&self.next, &self.previous) {
+            (Some(PaginationToken::Cursor(n)), Some(PaginationToken::Cursor(p))) if n == p => {
+                Some("duplicate cursor detected (possible infinite loop)")
+            }
+            (Some(PaginationToken::Url(n)), Some(PaginationToken::Url(p))) if n == p => {
+                Some("duplicate URL detected (possible infinite loop)")
+            }
+            _ => None,
         }
     }
 
@@ -49,27 +73,29 @@ impl PaginationState {
         self.pages_fetched >= max_pages
     }
 
-    /// Save current next values as previous (for loop detection) and increment page count.
+    /// Save current next value as previous (for loop detection) and increment page count.
     ///
     /// Call this before fetching each subsequent page.
     pub(crate) fn advance(&mut self) {
-        self.prev_cursor.clone_from(&self.next_cursor);
-        self.prev_url.clone_from(&self.next_url);
+        self.previous = self.next.clone();
         self.pages_fetched += 1;
     }
 
     /// Record the first page after initial `make_request` in `begin_scan`.
     ///
-    /// Only sets `pages_fetched = 1`. Does NOT copy `next_cursor`/`next_url`
-    /// into `prev_*` — there was no cursor sent for the first page, so `prev_*`
-    /// must stay `None` to avoid a false-positive loop detection.
+    /// Only sets `pages_fetched = 1`. Does NOT copy `next` into `previous` —
+    /// there was no token sent for the first page, so `previous` must stay
+    /// `None` to avoid a false-positive loop detection.
     pub(crate) fn record_first_page(&mut self) {
         self.pages_fetched = 1;
     }
 
-    /// Clear next-page pointers (e.g., on 404 or empty response).
+    /// Clear next-page token (e.g., on 404 or empty response).
     pub(crate) fn clear_next(&mut self) {
-        self.next_cursor = None;
-        self.next_url = None;
+        self.next = None;
     }
 }
+
+#[cfg(test)]
+#[path = "pagination_tests.rs"]
+mod tests;

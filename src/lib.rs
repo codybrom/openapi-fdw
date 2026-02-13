@@ -114,6 +114,50 @@ impl Default for OpenApiFdw {
 static mut INSTANCE: *mut OpenApiFdw = std::ptr::null_mut::<OpenApiFdw>();
 static FDW_NAME: &str = "OpenApiFdw";
 
+const READ_ONLY_ERROR: &str = "OpenAPI FDW is read-only";
+const HOST_VERSION_REQUIREMENT: &str = "^0.1.0";
+const DEFAULT_PAGE_SIZE_PARAM: &str = "limit";
+const DEFAULT_CURSOR_PARAM: &str = "after";
+const DEFAULT_ROWID_COLUMN: &str = "id";
+
+/// Validate that a URL starts with `http://` or `https://`.
+fn validate_url(url: &str, field_name: &str) -> Result<(), String> {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err(format!(
+            "Invalid {field_name}: '{url}'. Must start with http:// or https://"
+        ));
+    }
+    Ok(())
+}
+
+/// Parse a string option value as `usize`, returning a descriptive error.
+fn parse_usize_option(value: &str, field_name: &str) -> Result<usize, String> {
+    value
+        .parse()
+        .map_err(|_| format!("Invalid value for '{field_name}': '{value}'"))
+}
+
+/// Parse an optional string as a boolean flag (`"true"` or `"1"` → true).
+fn parse_bool_flag(value: Option<&str>) -> bool {
+    value.is_some_and(|v| v == "true" || v == "1")
+}
+
+/// Check whether the consumed row count has reached or exceeded the limit.
+fn should_stop_scanning(consumed: i64, limit: Option<i64>) -> bool {
+    limit.is_some_and(|l| consumed >= l)
+}
+
+/// Extract the effective row from a JSON value, optionally dereferencing an object path.
+///
+/// Used in `iter_scan` and `build_column_key_map` to apply `object_path`
+/// (e.g., `"/properties"` for GeoJSON) to each row before column matching.
+pub(crate) fn extract_effective_row<'a>(
+    row: &'a JsonValue,
+    object_path: Option<&str>,
+) -> &'a JsonValue {
+    object_path.map_or(row, |path| row.pointer(path).unwrap_or(row))
+}
+
 impl OpenApiFdw {
     fn init() {
         let instance = Self::default();
@@ -138,7 +182,7 @@ impl OpenApiFdw {
 
 impl Guest for OpenApiFdw {
     fn host_version_requirement() -> String {
-        "^0.1.0".to_string()
+        HOST_VERSION_REQUIREMENT.to_string()
     }
 
     fn init(ctx: &Context) -> FdwResult {
@@ -155,14 +199,8 @@ impl Guest for OpenApiFdw {
             .to_string();
 
         // Validate base_url format if provided
-        if !this.config.base_url.is_empty()
-            && !this.config.base_url.starts_with("http://")
-            && !this.config.base_url.starts_with("https://")
-        {
-            return Err(format!(
-                "Invalid base_url: '{}'. Must start with http:// or https://",
-                this.config.base_url
-            ));
+        if !this.config.base_url.is_empty() {
+            validate_url(&this.config.base_url, "base_url")?;
         }
 
         // Get spec_url for import_foreign_schema
@@ -176,11 +214,7 @@ impl Guest for OpenApiFdw {
 
         // Validate spec_url format if provided
         if let Some(ref spec_url) = this.config.spec_url {
-            if !spec_url.starts_with("http://") && !spec_url.starts_with("https://") {
-                return Err(format!(
-                    "Invalid spec_url: '{spec_url}'. Must start with http:// or https://"
-                ));
-            }
+            validate_url(spec_url, "spec_url")?;
         }
 
         this.config.configure_headers(&opts)?;
@@ -188,33 +222,25 @@ impl Guest for OpenApiFdw {
 
         // Pagination defaults (page_size=0 means no automatic limit parameter)
         this.config.page_size = match opts.get("page_size") {
-            Some(s) => s
-                .parse()
-                .map_err(|_| format!("Invalid value for 'page_size': '{s}'"))?,
+            Some(s) => parse_usize_option(&s, "page_size")?,
             None => 0,
         };
 
-        this.config.page_size_param = opts.require_or("page_size_param", "limit");
-        this.config.cursor_param = opts.require_or("cursor_param", "after");
+        this.config.page_size_param = opts.require_or("page_size_param", DEFAULT_PAGE_SIZE_PARAM);
+        this.config.cursor_param = opts.require_or("cursor_param", DEFAULT_CURSOR_PARAM);
 
         // Maximum pages per scan (default 1000, prevents infinite pagination loops)
         if let Some(s) = opts.get("max_pages") {
-            this.config.max_pages = s
-                .parse()
-                .map_err(|_| format!("Invalid value for 'max_pages': '{s}'"))?;
+            this.config.max_pages = parse_usize_option(&s, "max_pages")?;
         }
 
         // Maximum response body size (default 50 MiB)
         if let Some(s) = opts.get("max_response_bytes") {
-            this.config.max_response_bytes = s
-                .parse()
-                .map_err(|_| format!("Invalid value for 'max_response_bytes': '{s}'"))?;
+            this.config.max_response_bytes = parse_usize_option(&s, "max_response_bytes")?;
         }
 
         // Debug timing: emit per-scan timing via NOTICE when enabled
-        this.config.debug_timing = opts
-            .get("debug_timing")
-            .is_some_and(|v| v == "true" || v == "1");
+        this.config.debug_timing = parse_bool_flag(opts.get("debug_timing").as_deref());
 
         // Save server-level pagination defaults for restoration in begin_scan
         this.config.save_pagination_defaults();
@@ -230,7 +256,9 @@ impl Guest for OpenApiFdw {
 
         // Get table options
         this.endpoint = opts.require("endpoint")?;
-        this.rowid_col = opts.require_or("rowid_column", "id").to_lowercase();
+        this.rowid_col = opts
+            .require_or("rowid_column", DEFAULT_ROWID_COLUMN)
+            .to_lowercase();
 
         // HTTP method (default GET, case-insensitive)
         this.method = match opts.get("method") {
@@ -317,10 +345,8 @@ impl Guest for OpenApiFdw {
             }
 
             // Check if limit is satisfied - stop pagination early
-            if let Some(limit) = this.src_limit {
-                if this.consumed_row_cnt >= limit {
-                    return Ok(None);
-                }
+            if should_stop_scanning(this.consumed_row_cnt, this.src_limit) {
+                return Ok(None);
             }
 
             // Pagination safety: detect loops and enforce page limit
@@ -349,10 +375,7 @@ impl Guest for OpenApiFdw {
 
         // Convert current row (apply object_path if set, e.g., "/properties" for GeoJSON)
         let src_row = &this.src_rows[this.src_idx];
-        let effective_row = this
-            .object_path
-            .as_ref()
-            .map_or(src_row, |path| src_row.pointer(path).unwrap_or(src_row));
+        let effective_row = extract_effective_row(src_row, this.object_path.as_deref());
         for (col_idx, _) in this.cached_columns.iter().enumerate() {
             let cell = this.json_to_cell_cached(effective_row, col_idx)?;
             row.push(cell.as_ref());
@@ -395,23 +418,23 @@ impl Guest for OpenApiFdw {
     }
 
     fn begin_modify(_ctx: &Context) -> FdwResult {
-        Err("OpenAPI FDW is read-only".to_string())
+        Err(READ_ONLY_ERROR.to_string())
     }
 
     fn insert(_ctx: &Context, _row: &Row) -> FdwResult {
-        Err("OpenAPI FDW is read-only".to_string())
+        Err(READ_ONLY_ERROR.to_string())
     }
 
     fn update(_ctx: &Context, _rowid: Cell, _row: &Row) -> FdwResult {
-        Err("OpenAPI FDW is read-only".to_string())
+        Err(READ_ONLY_ERROR.to_string())
     }
 
     fn delete(_ctx: &Context, _rowid: Cell) -> FdwResult {
-        Err("OpenAPI FDW is read-only".to_string())
+        Err(READ_ONLY_ERROR.to_string())
     }
 
     fn end_modify(_ctx: &Context) -> FdwResult {
-        Err("OpenAPI FDW is read-only".to_string())
+        Err(READ_ONLY_ERROR.to_string())
     }
 
     fn import_foreign_schema(

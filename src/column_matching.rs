@@ -7,11 +7,11 @@ use std::borrow::Cow;
 
 use serde_json::Value as JsonValue;
 
-use crate::OpenApiFdw;
 use crate::bindings::supabase::wrappers::{
     time,
     types::{Cell, FdwError, TypeOid},
 };
+use crate::{OpenApiFdw, extract_effective_row};
 
 /// How a SQL column name was resolved to a JSON key.
 ///
@@ -102,9 +102,7 @@ impl OpenApiFdw {
         }
 
         let first_row = &self.src_rows[0];
-        let effective_row = self.object_path.as_ref().map_or(first_row, |path| {
-            first_row.pointer(path).unwrap_or(first_row)
-        });
+        let effective_row = extract_effective_row(first_row, self.object_path.as_deref());
 
         self.column_key_map = if let Some(obj) = effective_row.as_object() {
             self.cached_columns

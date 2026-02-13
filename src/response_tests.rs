@@ -1,5 +1,6 @@
 use super::*;
 use crate::config::ServerConfig;
+use crate::pagination::PaginationToken;
 
 // --- json_to_rows tests ---
 
@@ -298,8 +299,10 @@ fn test_handle_pagination_cursor_path_token() {
     let mut fdw = make_fdw_for_pagination("/cursor");
     let resp = serde_json::json!({"cursor": "abc123", "data": []});
     fdw.handle_pagination(&resp);
-    assert_eq!(fdw.pagination.next_cursor, Some("abc123".to_string()));
-    assert_eq!(fdw.pagination.next_url, None);
+    assert_eq!(
+        fdw.pagination.next,
+        Some(PaginationToken::Cursor("abc123".to_string()))
+    );
 }
 
 #[test]
@@ -310,10 +313,11 @@ fn test_handle_pagination_cursor_path_full_url() {
         "data": []
     });
     fdw.handle_pagination(&resp);
-    assert_eq!(fdw.pagination.next_cursor, None);
     assert_eq!(
-        fdw.pagination.next_url,
-        Some("https://api.example.com/items?cursor=xyz".to_string())
+        fdw.pagination.next,
+        Some(PaginationToken::Url(
+            "https://api.example.com/items?cursor=xyz".to_string()
+        ))
     );
 }
 
@@ -322,10 +326,11 @@ fn test_handle_pagination_cursor_path_http_url() {
     let mut fdw = make_fdw_for_pagination("/next");
     let resp = serde_json::json!({"next": "http://api.example.com/page2"});
     fdw.handle_pagination(&resp);
-    assert_eq!(fdw.pagination.next_cursor, None);
     assert_eq!(
-        fdw.pagination.next_url,
-        Some("http://api.example.com/page2".to_string())
+        fdw.pagination.next,
+        Some(PaginationToken::Url(
+            "http://api.example.com/page2".to_string()
+        ))
     );
 }
 
@@ -334,8 +339,7 @@ fn test_handle_pagination_cursor_path_missing() {
     let mut fdw = make_fdw_for_pagination("/cursor");
     let resp = serde_json::json!({"data": []});
     fdw.handle_pagination(&resp);
-    assert_eq!(fdw.pagination.next_cursor, None);
-    assert_eq!(fdw.pagination.next_url, None);
+    assert!(fdw.pagination.next.is_none());
 }
 
 #[test]
@@ -346,10 +350,11 @@ fn test_handle_pagination_auto_detect_next_url() {
         "data": []
     });
     fdw.handle_pagination(&resp);
-    assert_eq!(fdw.pagination.next_cursor, None);
     assert_eq!(
-        fdw.pagination.next_url,
-        Some("https://api.example.com/items?page=2".to_string())
+        fdw.pagination.next,
+        Some(PaginationToken::Url(
+            "https://api.example.com/items?page=2".to_string()
+        ))
     );
 }
 
@@ -363,8 +368,10 @@ fn test_handle_pagination_auto_detect_links_next() {
     });
     fdw.handle_pagination(&resp);
     assert_eq!(
-        fdw.pagination.next_url,
-        Some("https://api.example.com/page2".to_string())
+        fdw.pagination.next,
+        Some(PaginationToken::Url(
+            "https://api.example.com/page2".to_string()
+        ))
     );
 }
 
@@ -378,8 +385,10 @@ fn test_handle_pagination_auto_detect_has_more_with_cursor() {
         "data": [{"id": 1}]
     });
     fdw.handle_pagination(&resp);
-    assert_eq!(fdw.pagination.next_cursor, Some("cursor_xyz".to_string()));
-    assert_eq!(fdw.pagination.next_url, None);
+    assert_eq!(
+        fdw.pagination.next,
+        Some(PaginationToken::Cursor("cursor_xyz".to_string()))
+    );
 }
 
 #[test]
@@ -392,8 +401,7 @@ fn test_handle_pagination_has_more_false_stops() {
         "data": [{"id": 1}]
     });
     fdw.handle_pagination(&resp);
-    assert_eq!(fdw.pagination.next_cursor, None);
-    assert_eq!(fdw.pagination.next_url, None);
+    assert!(fdw.pagination.next.is_none());
 }
 
 #[test]
@@ -410,8 +418,10 @@ fn test_handle_pagination_auto_detect_meta_pagination() {
     });
     fdw.handle_pagination(&resp);
     assert_eq!(
-        fdw.pagination.next_url,
-        Some("https://api.example.com/items?page=3".to_string())
+        fdw.pagination.next,
+        Some(PaginationToken::Url(
+            "https://api.example.com/items?page=3".to_string()
+        ))
     );
 }
 
@@ -421,8 +431,7 @@ fn test_handle_pagination_empty_string_next_url_stops() {
     let mut fdw = make_fdw_for_pagination("/next");
     let resp = serde_json::json!({"next": "", "data": []});
     fdw.handle_pagination(&resp);
-    assert_eq!(fdw.pagination.next_cursor, None);
-    assert_eq!(fdw.pagination.next_url, None);
+    assert!(fdw.pagination.next.is_none());
 }
 
 #[test]
@@ -431,8 +440,7 @@ fn test_handle_pagination_null_cursor_stops() {
     let mut fdw = make_fdw_for_pagination("/cursor");
     let resp = serde_json::json!({"cursor": null, "data": []});
     fdw.handle_pagination(&resp);
-    assert_eq!(fdw.pagination.next_cursor, None);
-    assert_eq!(fdw.pagination.next_url, None);
+    assert!(fdw.pagination.next.is_none());
 }
 
 #[test]
@@ -441,8 +449,7 @@ fn test_handle_pagination_array_response_no_autodetect() {
     let mut fdw = make_fdw_for_pagination("");
     let resp = serde_json::json!([{"id": 1}, {"id": 2}]);
     fdw.handle_pagination(&resp);
-    assert_eq!(fdw.pagination.next_cursor, None);
-    assert_eq!(fdw.pagination.next_url, None);
+    assert!(fdw.pagination.next.is_none());
 }
 
 #[test]
@@ -460,10 +467,9 @@ fn test_meta_pagination_has_more_nested() {
     });
     fdw.handle_pagination(&resp);
     assert_eq!(
-        fdw.pagination.next_cursor,
-        Some("cursor_abc123".to_string())
+        fdw.pagination.next,
+        Some(PaginationToken::Cursor("cursor_abc123".to_string()))
     );
-    assert_eq!(fdw.pagination.next_url, None);
 }
 
 #[test]
@@ -475,8 +481,7 @@ fn test_handle_pagination_has_more_true_but_no_cursor() {
         "data": [{"id": 1}]
     });
     fdw.handle_pagination(&resp);
-    assert_eq!(fdw.pagination.next_cursor, None);
-    assert_eq!(fdw.pagination.next_url, None);
+    assert!(fdw.pagination.next.is_none());
 }
 
 #[test]
@@ -489,8 +494,10 @@ fn test_handle_pagination_next_url_direct_key() {
     });
     fdw.handle_pagination(&resp);
     assert_eq!(
-        fdw.pagination.next_url,
-        Some("https://api.example.com/items?page=3".to_string())
+        fdw.pagination.next,
+        Some(PaginationToken::Url(
+            "https://api.example.com/items?page=3".to_string()
+        ))
     );
 }
 
@@ -506,8 +513,10 @@ fn test_handle_pagination_pagination_next_url() {
     });
     fdw.handle_pagination(&resp);
     assert_eq!(
-        fdw.pagination.next_url,
-        Some("https://api.example.com/page/2".to_string())
+        fdw.pagination.next,
+        Some(PaginationToken::Url(
+            "https://api.example.com/page/2".to_string()
+        ))
     );
 }
 
@@ -521,8 +530,10 @@ fn test_handle_pagination_next_direct() {
     });
     fdw.handle_pagination(&resp);
     assert_eq!(
-        fdw.pagination.next_url,
-        Some("https://api.example.com/items?cursor=xyz".to_string())
+        fdw.pagination.next,
+        Some(PaginationToken::Url(
+            "https://api.example.com/items?cursor=xyz".to_string()
+        ))
     );
 }
 
@@ -533,8 +544,7 @@ fn test_handle_pagination_cursor_path_integer_value() {
     let resp = serde_json::json!({"cursor": 12345, "data": []});
     fdw.handle_pagination(&resp);
     // extract_non_empty_string returns None for non-string values
-    assert_eq!(fdw.pagination.next_cursor, None);
-    assert_eq!(fdw.pagination.next_url, None);
+    assert!(fdw.pagination.next.is_none());
 }
 
 #[test]
@@ -549,7 +559,10 @@ fn test_handle_pagination_pagination_has_more_with_cursor() {
         "data": [{"id": 1}]
     });
     fdw.handle_pagination(&resp);
-    assert_eq!(fdw.pagination.next_cursor, Some("pg_cursor_99".to_string()));
+    assert_eq!(
+        fdw.pagination.next,
+        Some(PaginationToken::Cursor("pg_cursor_99".to_string()))
+    );
 }
 
 #[test]
@@ -566,8 +579,10 @@ fn test_handle_pagination_meta_next_url() {
     });
     fdw.handle_pagination(&resp);
     assert_eq!(
-        fdw.pagination.next_url,
-        Some("https://api.example.com/page/4".to_string())
+        fdw.pagination.next,
+        Some(PaginationToken::Url(
+            "https://api.example.com/page/4".to_string()
+        ))
     );
 }
 
@@ -610,8 +625,7 @@ fn test_github_direct_array() {
     let mut pagination_fdw = make_fdw_for_pagination("");
     let array_resp = serde_json::json!([{"id": 1}, {"id": 2}]);
     pagination_fdw.handle_pagination(&array_resp);
-    assert_eq!(pagination_fdw.pagination.next_cursor, None);
-    assert_eq!(pagination_fdw.pagination.next_url, None);
+    assert!(pagination_fdw.pagination.next.is_none());
 }
 
 #[test]
@@ -627,8 +641,10 @@ fn test_hal_links_next_href_pagination() {
     });
     fdw.handle_pagination(&resp);
     assert_eq!(
-        fdw.pagination.next_url,
-        Some("https://api.example.com/items?page=2".to_string())
+        fdw.pagination.next,
+        Some(PaginationToken::Url(
+            "https://api.example.com/items?page=2".to_string()
+        ))
     );
 }
 

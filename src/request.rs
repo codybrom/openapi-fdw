@@ -11,6 +11,8 @@ use crate::bindings::supabase::wrappers::{
 use crate::spec::OpenApiSpec;
 use crate::{FDW_NAME, OpenApiFdw};
 
+const RETRY_AFTER_HEADER: &str = "retry-after";
+
 impl OpenApiFdw {
     /// Fetch and parse the `OpenAPI` spec
     pub(crate) fn fetch_spec(&mut self) -> Result<(), FdwError> {
@@ -22,8 +24,12 @@ impl OpenApiFdw {
                 body: String::default(),
             };
             let resp = http::get(&req)?;
-            http::error_for_status(&resp)
-                .map_err(|err| format!("Failed to fetch OpenAPI spec: {}: {}", err, resp.body))?;
+            http::error_for_status(&resp).map_err(|err| {
+                format!(
+                    "Failed to fetch OpenAPI spec (HTTP {}): {}",
+                    resp.status_code, err
+                )
+            })?;
 
             if resp.body.len() > self.config.max_response_bytes {
                 return Err(format!(
@@ -190,7 +196,7 @@ impl OpenApiFdw {
         let mut injected_entries = Vec::new();
 
         // Add pagination cursor if we have one
-        if let Some(ref cursor) = self.pagination.next_cursor {
+        if let Some(cursor) = self.pagination.next.as_ref().and_then(|t| t.as_cursor()) {
             params.push(format!(
                 "{}={}",
                 self.config.cursor_param,
@@ -259,7 +265,7 @@ impl OpenApiFdw {
     /// Returns an error if required path parameters are missing from the WHERE clause.
     pub(crate) fn build_url(&mut self, ctx: &Context) -> Result<String, String> {
         // Use next_url for pagination if available (injected_params unchanged)
-        if let Some(ref next_url) = self.pagination.next_url {
+        if let Some(next_url) = self.pagination.next.as_ref().and_then(|t| t.as_url()) {
             return Ok(self.resolve_pagination_url(next_url));
         }
 
@@ -340,7 +346,7 @@ impl OpenApiFdw {
                 let delay_ms = resp
                     .headers
                     .iter()
-                    .find(|h| h.0.to_lowercase() == "retry-after")
+                    .find(|h| h.0.to_lowercase() == RETRY_AFTER_HEADER)
                     .and_then(|h| h.1.parse::<u64>().ok())
                     .map(|secs| secs.saturating_mul(1000).min(MAX_RETRY_DELAY_MS))
                     .unwrap_or_else(|| {
@@ -379,7 +385,8 @@ impl OpenApiFdw {
             return Ok(());
         }
 
-        http::error_for_status(&resp).map_err(|err| format!("{}: {}", err, resp.body))?;
+        http::error_for_status(&resp)
+            .map_err(|err| format!("HTTP {} error: {}", resp.status_code, err))?;
 
         if resp.body.len() > self.config.max_response_bytes {
             return Err(format!(

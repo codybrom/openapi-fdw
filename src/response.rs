@@ -4,6 +4,40 @@ use serde_json::Value as JsonValue;
 
 use crate::OpenApiFdw;
 use crate::bindings::supabase::wrappers::types::FdwError;
+use crate::pagination::PaginationToken;
+
+/// Common wrapper keys for auto-detecting the data array in API responses.
+pub(crate) const WRAPPER_KEYS: &[&str] = &[
+    "data", "results", "items", "records", "entries", "features", "@graph",
+];
+
+/// JSON pointer paths to check for a next-page URL.
+const NEXT_URL_PATHS: &[&str] = &[
+    "/meta/pagination/next",
+    "/meta/pagination/next_url",
+    "/pagination/next",
+    "/pagination/next_url",
+    "/links/next",
+    "/links/next_url",
+    "/next",
+    "/next_url",
+    "/_links/next/href",
+];
+
+/// JSON pointer paths to check for a boolean "has more pages" flag.
+const HAS_MORE_PATHS: &[&str] = &[
+    "/meta/pagination/has_more",
+    "/has_more",
+    "/pagination/has_more",
+];
+
+/// JSON pointer paths to check for a next-page cursor value.
+const CURSOR_PATHS: &[&str] = &[
+    "/meta/pagination/next_cursor",
+    "/pagination/next_cursor",
+    "/next_cursor",
+    "/cursor",
+];
 
 impl OpenApiFdw {
     /// Extract the data array from the response, taking ownership to avoid cloning
@@ -36,11 +70,12 @@ impl OpenApiFdw {
 
         // Try common wrapper patterns
         if resp.is_object() {
-            for key in [
-                "data", "results", "items", "records", "entries", "features", "@graph",
-            ] {
-                if resp.get(key).is_some_and(|d| d.is_array() || d.is_object()) {
-                    return Self::json_to_rows(resp[key].take());
+            for key in WRAPPER_KEYS {
+                if resp
+                    .get(*key)
+                    .is_some_and(|d| d.is_array() || d.is_object())
+                {
+                    return Self::json_to_rows(resp[*key].take());
                 }
             }
 
@@ -51,7 +86,7 @@ impl OpenApiFdw {
         Err(format!(
             "Unable to extract data from response (type: {}). \
              Expected an array, object with a known wrapper key \
-             (data, results, items, records, entries, features, @graph), \
+             ({}), \
              or set response_path in table options.",
             match resp {
                 JsonValue::Null => "null",
@@ -59,7 +94,8 @@ impl OpenApiFdw {
                 JsonValue::Number(_) => "number",
                 JsonValue::String(_) => "string",
                 _ => "unknown",
-            }
+            },
+            WRAPPER_KEYS.join(", "),
         ))
     }
 
@@ -89,9 +125,9 @@ impl OpenApiFdw {
         if !self.cursor_path.is_empty() {
             if let Some(value) = Self::extract_non_empty_string(resp, &self.cursor_path) {
                 if value.starts_with("http://") || value.starts_with("https://") {
-                    self.pagination.next_url = Some(value);
+                    self.pagination.next = Some(PaginationToken::Url(value));
                 } else {
-                    self.pagination.next_cursor = Some(value);
+                    self.pagination.next = Some(PaginationToken::Cursor(value));
                 }
                 return;
             }
@@ -103,31 +139,15 @@ impl OpenApiFdw {
         }
 
         // Check for next URL in common locations
-        let next_url_paths = [
-            "/meta/pagination/next",
-            "/meta/pagination/next_url",
-            "/pagination/next",
-            "/pagination/next_url",
-            "/links/next",
-            "/links/next_url",
-            "/next",
-            "/next_url",
-            "/_links/next/href",
-        ];
-        for path in &next_url_paths {
+        for path in NEXT_URL_PATHS {
             if let Some(url) = Self::extract_non_empty_string(resp, path) {
-                self.pagination.next_url = Some(url);
+                self.pagination.next = Some(PaginationToken::Url(url));
                 return;
             }
         }
 
         // Check for has_more flag with cursor
-        let has_more_paths = [
-            "/meta/pagination/has_more",
-            "/has_more",
-            "/pagination/has_more",
-        ];
-        let has_more = has_more_paths
+        let has_more = HAS_MORE_PATHS
             .iter()
             .find_map(|p| resp.pointer(p))
             .and_then(JsonValue::as_bool)
@@ -138,15 +158,9 @@ impl OpenApiFdw {
         }
 
         // Find next cursor
-        let cursor_paths = [
-            "/meta/pagination/next_cursor",
-            "/pagination/next_cursor",
-            "/next_cursor",
-            "/cursor",
-        ];
-        for path in &cursor_paths {
+        for path in CURSOR_PATHS {
             if let Some(cursor) = Self::extract_non_empty_string(resp, path) {
-                self.pagination.next_cursor = Some(cursor);
+                self.pagination.next = Some(PaginationToken::Cursor(cursor));
                 return;
             }
         }
