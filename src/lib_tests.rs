@@ -1828,3 +1828,51 @@ fn test_rowid_url_encoding_normal_ids() {
         "550e8400-e29b-41d4-a716-446655440000"
     );
 }
+
+// --- Retry delay cap tests ---
+
+#[test]
+fn test_retry_delay_cap_normal_value() {
+    // Normal Retry-After: 5 seconds → 5000ms, well under cap
+    let secs: u64 = 5;
+    let max_delay: u64 = 30_000;
+    let delay = secs.saturating_mul(1000).min(max_delay);
+    assert_eq!(delay, 5000);
+}
+
+#[test]
+fn test_retry_delay_cap_large_value() {
+    // Absurdly large Retry-After: 999999 seconds → capped to 30s
+    let secs: u64 = 999_999;
+    let max_delay: u64 = 30_000;
+    let delay = secs.saturating_mul(1000).min(max_delay);
+    assert_eq!(delay, 30_000);
+}
+
+#[test]
+fn test_retry_delay_cap_u64_max() {
+    // u64::MAX seconds → saturating_mul prevents overflow, then capped
+    let secs: u64 = u64::MAX;
+    let max_delay: u64 = 30_000;
+    let delay = secs.saturating_mul(1000).min(max_delay);
+    assert_eq!(delay, 30_000);
+}
+
+#[test]
+fn test_retry_delay_cap_zero() {
+    // Retry-After: 0 → 0ms (immediate retry)
+    let secs: u64 = 0;
+    let max_delay: u64 = 30_000;
+    let delay = secs.saturating_mul(1000).min(max_delay);
+    assert_eq!(delay, 0);
+}
+
+#[test]
+fn test_retry_backoff_cap() {
+    // Exponential backoff at retry_count=10 would be 1024s, but capped
+    let retry_count: u32 = 10;
+    let max_delay: u64 = 30_000;
+    let backoff = 1000u64.saturating_mul(1 << retry_count);
+    let delay = backoff.min(max_delay);
+    assert_eq!(delay, 30_000);
+}

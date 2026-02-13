@@ -472,6 +472,7 @@ impl OpenApiFdw {
         // Retry loop for rate limiting (HTTP 429)
         let mut retry_count = 0;
         const MAX_RETRIES: u32 = 3;
+        const MAX_RETRY_DELAY_MS: u64 = 30_000;
 
         let resp = loop {
             let resp = match req.method {
@@ -482,19 +483,24 @@ impl OpenApiFdw {
             // Handle rate limiting (HTTP 429)
             if resp.status_code == 429 {
                 if retry_count >= MAX_RETRIES {
-                    return Err("API rate limit exceeded after max retries".to_string());
+                    return Err(format!(
+                        "API rate limit exceeded after {MAX_RETRIES} retries. \
+                         Consider adding a page_size option to reduce request frequency."
+                    ));
                 }
 
-                // Try to get retry delay from Retry-After header (case-insensitive)
+                // Try to get retry delay from Retry-After header (case-insensitive),
+                // capped to prevent absurdly long waits from malicious/buggy servers
                 let delay_ms = resp
                     .headers
                     .iter()
                     .find(|h| h.0.to_lowercase() == "retry-after")
                     .and_then(|h| h.1.parse::<u64>().ok())
-                    .map(|secs| secs * 1000)
+                    .map(|secs| secs.saturating_mul(1000).min(MAX_RETRY_DELAY_MS))
                     .unwrap_or_else(|| {
-                        // Exponential backoff: 1s, 2s, 4s
-                        1000 * (1 << retry_count)
+                        // Exponential backoff: 1s, 2s, 4s (capped)
+                        let backoff = 1000u64.saturating_mul(1 << retry_count);
+                        backoff.min(MAX_RETRY_DELAY_MS)
                     });
 
                 time::sleep(delay_ms);
