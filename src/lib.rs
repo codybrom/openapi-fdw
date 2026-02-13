@@ -590,10 +590,21 @@ impl OpenApiFdw {
     fn extract_data(&self, resp: &mut JsonValue) -> Result<Vec<JsonValue>, FdwError> {
         // If response_path is specified, use it
         if let Some(ref path) = self.response_path {
-            let data = resp
-                .pointer_mut(path)
-                .map(JsonValue::take)
-                .ok_or_else(|| format!("Response path '{path}' not found in response"))?;
+            let data = resp.pointer_mut(path).map(JsonValue::take).ok_or_else(|| {
+                let available = resp
+                    .as_object()
+                    .map(|obj| {
+                        obj.keys()
+                            .map(|k| format!("'{k}'"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                format!(
+                    "Response path '{path}' not found in response. \
+                         Available top-level keys: [{available}]"
+                )
+            })?;
 
             return Self::json_to_rows(data);
         }
@@ -617,7 +628,19 @@ impl OpenApiFdw {
             return Ok(vec![resp.take()]);
         }
 
-        Err("Unable to extract data from response".to_string())
+        Err(format!(
+            "Unable to extract data from response (type: {}). \
+             Expected an array, object with a known wrapper key \
+             (data, results, items, records, entries, features, @graph), \
+             or set response_path in table options.",
+            match resp {
+                JsonValue::Null => "null",
+                JsonValue::Bool(_) => "boolean",
+                JsonValue::Number(_) => "number",
+                JsonValue::String(_) => "string",
+                _ => "unknown",
+            }
+        ))
     }
 
     /// Convert a JSON value to a vector of row objects (takes ownership, no cloning)
@@ -625,7 +648,16 @@ impl OpenApiFdw {
         match data {
             JsonValue::Array(arr) => Ok(arr),
             data if data.is_object() => Ok(vec![data]),
-            _ => Err("Response data is not an array or object".to_string()),
+            _ => Err(format!(
+                "Response data is not an array or object (got {})",
+                match &data {
+                    JsonValue::Null => "null",
+                    JsonValue::Bool(_) => "boolean",
+                    JsonValue::Number(_) => "number",
+                    JsonValue::String(_) => "string",
+                    _ => "unknown",
+                }
+            )),
         }
     }
 

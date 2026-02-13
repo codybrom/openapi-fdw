@@ -33,7 +33,11 @@ fn test_json_to_rows_empty_array() {
 #[test]
 fn test_json_to_rows_rejects_primitive() {
     let data = serde_json::json!("just a string");
-    assert!(OpenApiFdw::json_to_rows(data).is_err());
+    let err = OpenApiFdw::json_to_rows(data).unwrap_err();
+    assert!(
+        err.contains("string"),
+        "Error should mention the type: {err}"
+    );
 }
 
 // --- extract_data tests ---
@@ -77,7 +81,15 @@ fn test_extract_data_with_nested_response_path() {
 fn test_extract_data_invalid_response_path() {
     let fdw = fdw_with_response_path(Some("/nonexistent"));
     let mut resp = serde_json::json!({"data": [1, 2, 3]});
-    assert!(fdw.extract_data(&mut resp).is_err());
+    let err = fdw.extract_data(&mut resp).unwrap_err();
+    assert!(
+        err.contains("nonexistent"),
+        "Error should mention the missing path"
+    );
+    assert!(
+        err.contains("'data'"),
+        "Error should list available keys: {err}"
+    );
 }
 
 #[test]
@@ -1883,6 +1895,35 @@ fn test_retry_backoff_cap() {
 fn test_max_response_bytes_default() {
     let fdw = OpenApiFdw::default();
     assert_eq!(fdw.max_response_bytes, 50 * 1024 * 1024); // 50 MiB
+}
+
+// --- Error message context tests ---
+
+#[test]
+fn test_extract_data_error_shows_type_for_non_extractable() {
+    let fdw = fdw_with_response_path(None);
+    let mut resp = serde_json::json!(42);
+    let err = fdw.extract_data(&mut resp).unwrap_err();
+    assert!(
+        err.contains("number"),
+        "Error should mention JSON type: {err}"
+    );
+    assert!(
+        err.contains("response_path"),
+        "Error should suggest response_path: {err}"
+    );
+}
+
+#[test]
+fn test_json_to_rows_error_shows_type() {
+    let err = OpenApiFdw::json_to_rows(serde_json::json!(null)).unwrap_err();
+    assert!(err.contains("null"), "Error should show type: {err}");
+
+    let err = OpenApiFdw::json_to_rows(serde_json::json!(true)).unwrap_err();
+    assert!(err.contains("boolean"), "Error should show type: {err}");
+
+    let err = OpenApiFdw::json_to_rows(serde_json::json!(42)).unwrap_err();
+    assert!(err.contains("number"), "Error should show type: {err}");
 }
 
 // --- Pagination safety tests ---
