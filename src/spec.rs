@@ -5,6 +5,7 @@
 
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
+use std::cell::Cell;
 use std::collections::HashMap;
 
 /// Raw schema for deserialization — handles OpenAPI 3.1 type arrays.
@@ -314,25 +315,38 @@ impl OpenApiSpec {
     }
 
     /// Recursively resolve a schema, following $ref pointers and handling composition.
-    /// Uses depth limiting to prevent infinite recursion on circular references.
+    /// Uses depth limiting and a call counter to prevent infinite recursion and
+    /// exponential blowup on branching schemas.
     pub fn resolve_schema(&self, schema: &Schema) -> Schema {
-        self.resolve_schema_with_depth(schema, 0)
+        let call_count = Cell::new(0usize);
+        self.resolve_schema_internal(schema, 0, &call_count)
     }
 
     /// Maximum depth for schema resolution to prevent stack overflow on circular refs
     const MAX_RESOLVE_DEPTH: usize = 32;
 
-    /// Internal schema resolution with depth tracking
-    fn resolve_schema_with_depth(&self, schema: &Schema, depth: usize) -> Schema {
-        // Guard against circular references
-        if depth > Self::MAX_RESOLVE_DEPTH {
+    /// Maximum total resolve calls to prevent exponential blowup on branching schemas
+    const MAX_RESOLVE_CALLS: usize = 10_000;
+
+    /// Internal schema resolution with depth and call-count tracking
+    fn resolve_schema_internal(
+        &self,
+        schema: &Schema,
+        depth: usize,
+        call_count: &Cell<usize>,
+    ) -> Schema {
+        let count = call_count.get() + 1;
+        call_count.set(count);
+
+        // Guard against circular references and exponential blowup
+        if depth > Self::MAX_RESOLVE_DEPTH || count > Self::MAX_RESOLVE_CALLS {
             return schema.clone();
         }
 
         // First resolve any $ref
         if let Some(ref reference) = schema.reference {
             if let Some(resolved) = self.resolve_ref(reference) {
-                let mut result = self.resolve_schema_with_depth(resolved, depth + 1);
+                let mut result = self.resolve_schema_internal(resolved, depth + 1, call_count);
                 // Merge non-default siblings (OpenAPI 3.1 $ref with siblings)
                 if schema.nullable {
                     result.nullable = true;
@@ -354,24 +368,29 @@ impl OpenApiSpec {
 
         // Handle allOf by merging all properties (intersection - all schemas apply)
         if !schema.all_of.is_empty() {
-            return self.merge_allof_schemas(&schema.all_of, depth + 1);
+            return self.merge_allof_schemas(&schema.all_of, depth + 1, call_count);
         }
 
         // Handle oneOf by merging all possible properties as nullable (union - one of the schemas)
         if !schema.one_of.is_empty() {
-            return self.merge_union_schemas(&schema.one_of, depth + 1);
+            return self.merge_union_schemas(&schema.one_of, depth + 1, call_count);
         }
 
         // Handle anyOf by merging all possible properties as nullable (union - any of the schemas)
         if !schema.any_of.is_empty() {
-            return self.merge_union_schemas(&schema.any_of, depth + 1);
+            return self.merge_union_schemas(&schema.any_of, depth + 1, call_count);
         }
 
         schema.clone()
     }
 
     /// Merge allOf schemas: later schemas refine/override earlier ones, required fields preserved.
-    fn merge_allof_schemas(&self, schemas: &[Schema], depth: usize) -> Schema {
+    fn merge_allof_schemas(
+        &self,
+        schemas: &[Schema],
+        depth: usize,
+        call_count: &Cell<usize>,
+    ) -> Schema {
         let mut merged = Schema {
             properties: HashMap::new(),
             required: Vec::new(),
@@ -381,7 +400,7 @@ impl OpenApiSpec {
         let mut has_any_properties = false;
 
         for sub_schema in schemas {
-            let resolved = self.resolve_schema_with_depth(sub_schema, depth);
+            let resolved = self.resolve_schema_internal(sub_schema, depth, call_count);
 
             if !resolved.properties.is_empty() {
                 has_any_properties = true;
@@ -406,7 +425,12 @@ impl OpenApiSpec {
     }
 
     /// Merge oneOf/anyOf schemas: all properties become nullable, first definition wins.
-    fn merge_union_schemas(&self, schemas: &[Schema], depth: usize) -> Schema {
+    fn merge_union_schemas(
+        &self,
+        schemas: &[Schema],
+        depth: usize,
+        call_count: &Cell<usize>,
+    ) -> Schema {
         let mut merged = Schema {
             properties: HashMap::new(),
             required: Vec::new(),
@@ -416,7 +440,7 @@ impl OpenApiSpec {
         let mut has_any_properties = false;
 
         for sub_schema in schemas {
-            let resolved = self.resolve_schema_with_depth(sub_schema, depth);
+            let resolved = self.resolve_schema_internal(sub_schema, depth, call_count);
 
             if !resolved.properties.is_empty() {
                 has_any_properties = true;

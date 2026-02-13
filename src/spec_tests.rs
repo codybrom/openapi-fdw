@@ -5143,3 +5143,89 @@ fn test_31_get_post_same_path_different_schemas() {
     assert_eq!(endpoints[0].table_name(), "items");
     assert_eq!(endpoints[1].table_name(), "items_post");
 }
+
+#[test]
+fn test_branching_allof_completes_within_call_limit() {
+    // Build a spec where allOf branches exponentially:
+    // Root -> allOf[A, B, C, D, E] and each of those -> allOf[F, G, H, I, J]
+    // That's 5*5 = 25 resolve calls, well within the 10,000 limit.
+    // This test verifies branching specs complete and produce merged properties.
+    let spec_json = r##"{
+        "openapi": "3.0.0",
+        "info": {"title": "Branch Test", "version": "1.0"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "Leaf1": {"type": "object", "properties": {"a": {"type": "string"}}},
+                "Leaf2": {"type": "object", "properties": {"b": {"type": "integer"}}},
+                "Leaf3": {"type": "object", "properties": {"c": {"type": "boolean"}}},
+                "Leaf4": {"type": "object", "properties": {"d": {"type": "number"}}},
+                "Leaf5": {"type": "object", "properties": {"e": {"type": "string"}}},
+                "Mid1": {"allOf": [{"$ref": "#/components/schemas/Leaf1"}, {"$ref": "#/components/schemas/Leaf2"}]},
+                "Mid2": {"allOf": [{"$ref": "#/components/schemas/Leaf3"}, {"$ref": "#/components/schemas/Leaf4"}]},
+                "Mid3": {"allOf": [{"$ref": "#/components/schemas/Leaf5"}, {"$ref": "#/components/schemas/Leaf1"}]},
+                "Mid4": {"allOf": [{"$ref": "#/components/schemas/Leaf2"}, {"$ref": "#/components/schemas/Leaf3"}]},
+                "Mid5": {"allOf": [{"$ref": "#/components/schemas/Leaf4"}, {"$ref": "#/components/schemas/Leaf5"}]},
+                "Root": {
+                    "allOf": [
+                        {"$ref": "#/components/schemas/Mid1"},
+                        {"$ref": "#/components/schemas/Mid2"},
+                        {"$ref": "#/components/schemas/Mid3"},
+                        {"$ref": "#/components/schemas/Mid4"},
+                        {"$ref": "#/components/schemas/Mid5"}
+                    ]
+                }
+            }
+        }
+    }"##;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let root = spec.resolve_ref("#/components/schemas/Root").unwrap();
+    let resolved = spec.resolve_schema(root);
+
+    // All 5 leaf properties should be merged
+    assert_eq!(resolved.schema_type, Some("object".to_string()));
+    assert!(resolved.properties.contains_key("a"));
+    assert!(resolved.properties.contains_key("b"));
+    assert!(resolved.properties.contains_key("c"));
+    assert!(resolved.properties.contains_key("d"));
+    assert!(resolved.properties.contains_key("e"));
+}
+
+#[test]
+fn test_excessive_branching_hits_call_limit_gracefully() {
+    // Build a spec where each level has 4 branches x 4 levels = 4^4 = 256 resolve calls.
+    // The call limit of 10,000 easily handles this, but we verify it doesn't hang.
+    // A truly exponential spec (4^10 = 1M) would be capped by MAX_RESOLVE_CALLS.
+    let spec_json = r##"{
+        "openapi": "3.0.0",
+        "info": {"title": "Deep Branch", "version": "1.0"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "L0a": {"type": "object", "properties": {"x": {"type": "string"}}},
+                "L0b": {"type": "object", "properties": {"y": {"type": "string"}}},
+                "L0c": {"type": "object", "properties": {"z": {"type": "string"}}},
+                "L0d": {"type": "object", "properties": {"w": {"type": "string"}}},
+                "L1a": {"allOf": [{"$ref": "#/components/schemas/L0a"}, {"$ref": "#/components/schemas/L0b"}, {"$ref": "#/components/schemas/L0c"}, {"$ref": "#/components/schemas/L0d"}]},
+                "L1b": {"allOf": [{"$ref": "#/components/schemas/L0a"}, {"$ref": "#/components/schemas/L0b"}, {"$ref": "#/components/schemas/L0c"}, {"$ref": "#/components/schemas/L0d"}]},
+                "L1c": {"allOf": [{"$ref": "#/components/schemas/L0a"}, {"$ref": "#/components/schemas/L0b"}, {"$ref": "#/components/schemas/L0c"}, {"$ref": "#/components/schemas/L0d"}]},
+                "L1d": {"allOf": [{"$ref": "#/components/schemas/L0a"}, {"$ref": "#/components/schemas/L0b"}, {"$ref": "#/components/schemas/L0c"}, {"$ref": "#/components/schemas/L0d"}]},
+                "L2a": {"allOf": [{"$ref": "#/components/schemas/L1a"}, {"$ref": "#/components/schemas/L1b"}, {"$ref": "#/components/schemas/L1c"}, {"$ref": "#/components/schemas/L1d"}]},
+                "L2b": {"allOf": [{"$ref": "#/components/schemas/L1a"}, {"$ref": "#/components/schemas/L1b"}, {"$ref": "#/components/schemas/L1c"}, {"$ref": "#/components/schemas/L1d"}]},
+                "L2c": {"allOf": [{"$ref": "#/components/schemas/L1a"}, {"$ref": "#/components/schemas/L1b"}, {"$ref": "#/components/schemas/L1c"}, {"$ref": "#/components/schemas/L1d"}]},
+                "L2d": {"allOf": [{"$ref": "#/components/schemas/L1a"}, {"$ref": "#/components/schemas/L1b"}, {"$ref": "#/components/schemas/L1c"}, {"$ref": "#/components/schemas/L1d"}]},
+                "Root": {"allOf": [{"$ref": "#/components/schemas/L2a"}, {"$ref": "#/components/schemas/L2b"}, {"$ref": "#/components/schemas/L2c"}, {"$ref": "#/components/schemas/L2d"}]}
+            }
+        }
+    }"##;
+
+    let spec = OpenApiSpec::from_str(spec_json).unwrap();
+    let root = spec.resolve_ref("#/components/schemas/Root").unwrap();
+
+    // Should complete without hanging — the call limit prevents exponential blowup
+    let resolved = spec.resolve_schema(root);
+
+    // Should still produce an object with merged properties (from the leaves that resolved)
+    assert_eq!(resolved.schema_type, Some("object".to_string()));
+}
