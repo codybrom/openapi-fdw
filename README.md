@@ -222,7 +222,7 @@ where zone_id = 'OKC143';
 | `api_key_location` | no | `header` | Where to send API key: `header`, `query`, or `cookie` |
 | `max_pages` | no | `1000` | Max pages per scan (prevents infinite pagination loops) |
 | `max_response_bytes` | no | `52428800` | Max response body size in bytes (default 50 MiB) |
-| `debug_timing` | no | `false` | Emit per-scan timing info via NOTICE when `'true'` or `'1'` |
+| `debug` | no | `false` | Emit HTTP details and scan stats via INFO when `'true'` or `'1'` |
 | `include_attrs` | no | `true` | Include `attrs` jsonb column in `IMPORT FOREIGN SCHEMA` output. Set to `'false'` to omit. |
 
 ## Table Options

@@ -28,7 +28,7 @@ pub(crate) struct ServerConfig {
     pub(crate) cursor_param: String,
     pub(crate) max_pages: usize,
     pub(crate) max_response_bytes: usize,
-    pub(crate) debug_timing: bool,
+    pub(crate) debug: bool,
 
     // Server-level defaults (saved after init, restored in begin_scan)
     pub(crate) default_page_size: usize,
@@ -49,7 +49,7 @@ impl Default for ServerConfig {
             cursor_param: String::new(),
             max_pages: DEFAULT_MAX_PAGES,
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
-            debug_timing: false,
+            debug: false,
             default_page_size: 0,
             default_page_size_param: String::new(),
             default_cursor_param: String::new(),

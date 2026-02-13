@@ -32,7 +32,7 @@ create server nws_server
     accept 'application/geo+json'
   );
 
--- NWS API server WITH debug_timing enabled for comparison
+-- NWS API server WITH debug enabled for comparison
 create server nws_server_debug
   foreign data wrapper wasm_wrapper
   options (
@@ -42,7 +42,7 @@ create server nws_server_debug
     base_url 'https://api.weather.gov',
     user_agent 'openapi-fdw-test/0.2.0',
     accept 'application/geo+json',
-    debug_timing 'true'
+    debug 'true'
   );
 
 -- Weather stations (GeoJSON FeatureCollection → /features, nested /properties)
@@ -64,7 +64,7 @@ create foreign table nws_stations (
     page_size_param 'limit'
   );
 
--- Same table with debug timing
+-- Same table with debug enabled
 create foreign table nws_stations_debug (
   station_identifier text,
   name text,

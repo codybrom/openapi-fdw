@@ -363,7 +363,7 @@ impl OpenApiFdw {
             break resp;
         };
 
-        if self.config.debug_timing {
+        if self.config.debug {
             crate::bindings::supabase::wrappers::utils::report_info(&format!(
                 "[openapi_fdw] HTTP {} {} -> {} ({} bytes)",
                 if matches!(req.method, http::Method::Post) {

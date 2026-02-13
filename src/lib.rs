@@ -74,7 +74,7 @@ struct OpenApiFdw {
     src_limit: Option<i64>,
     consumed_row_cnt: i64,
 
-    // Debug row counter (only active when config.debug_timing is true)
+    // Debug row counter (only active when config.debug is true)
     scan_row_count: i64,
 }
 
@@ -239,8 +239,8 @@ impl Guest for OpenApiFdw {
             this.config.max_response_bytes = parse_usize_option(&s, "max_response_bytes")?;
         }
 
-        // Debug timing: emit per-scan timing via NOTICE when enabled
-        this.config.debug_timing = parse_bool_flag(opts.get("debug_timing").as_deref());
+        // Debug: emit HTTP details and scan stats via INFO when enabled
+        this.config.debug = parse_bool_flag(opts.get("debug").as_deref());
 
         // Save server-level pagination defaults for restoration in begin_scan
         this.config.save_pagination_defaults();
@@ -320,7 +320,7 @@ impl Guest for OpenApiFdw {
             })
             .collect();
 
-        if this.config.debug_timing {
+        if this.config.debug {
             this.scan_row_count = 0;
         }
 
@@ -383,7 +383,7 @@ impl Guest for OpenApiFdw {
 
         this.src_idx += 1;
         this.consumed_row_cnt += 1;
-        if this.config.debug_timing {
+        if this.config.debug {
             this.scan_row_count += 1;
         }
 
@@ -402,7 +402,7 @@ impl Guest for OpenApiFdw {
     fn end_scan(_ctx: &Context) -> FdwResult {
         let this = Self::this_mut();
 
-        if this.config.debug_timing {
+        if this.config.debug {
             utils::report_info(&format!(
                 "[openapi_fdw] Scan complete: {} rows, {} columns",
                 this.scan_row_count,

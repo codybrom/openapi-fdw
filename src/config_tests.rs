@@ -33,9 +33,9 @@ fn test_default_empty_headers() {
 }
 
 #[test]
-fn test_default_debug_timing_off() {
+fn test_default_debug_off() {
     let config = ServerConfig::default();
-    assert!(!config.debug_timing);
+    assert!(!config.debug);
 }
 
 #[test]
@@ -130,7 +130,7 @@ fn test_restore_does_not_affect_non_pagination_fields() {
     let mut config = ServerConfig {
         base_url: "https://api.example.com".to_string(),
         max_pages: 500,
-        debug_timing: true,
+        debug: true,
         page_size: 25,
         ..Default::default()
     };
@@ -138,13 +138,13 @@ fn test_restore_does_not_affect_non_pagination_fields() {
 
     config.base_url = "https://other.example.com".to_string();
     config.max_pages = 100;
-    config.debug_timing = false;
+    config.debug = false;
 
     config.restore_pagination_defaults();
     // Non-pagination fields should be unchanged
     assert_eq!(config.base_url, "https://other.example.com");
     assert_eq!(config.max_pages, 100);
-    assert!(!config.debug_timing);
+    assert!(!config.debug);
     // Pagination fields should be restored
     assert_eq!(config.page_size, 25);
 }

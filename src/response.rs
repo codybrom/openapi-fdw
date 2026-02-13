@@ -44,23 +44,11 @@ impl OpenApiFdw {
     pub(crate) fn extract_data(&self, resp: &mut JsonValue) -> Result<Vec<JsonValue>, FdwError> {
         // If response_path is specified, use it
         if let Some(ref path) = self.response_path {
-            let data = resp.pointer_mut(path).map(JsonValue::take).ok_or_else(|| {
-                let available = resp
-                    .as_object()
-                    .map(|obj| {
-                        obj.keys()
-                            .map(|k| format!("'{k}'"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    })
-                    .unwrap_or_default();
-                format!(
-                    "Response path '{path}' not found in response. \
-                         Available top-level keys: [{available}]"
-                )
-            })?;
-
-            return Self::json_to_rows(data);
+            if let Some(data) = resp.pointer_mut(path).map(JsonValue::take) {
+                return Self::json_to_rows(data);
+            }
+            // response_path not found — fall through to auto-detection
+            // (common when rowid lookup returns single object instead of collection)
         }
 
         // Direct array response

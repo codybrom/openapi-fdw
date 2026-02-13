@@ -80,18 +80,31 @@ fn test_extract_data_with_nested_response_path() {
 }
 
 #[test]
-fn test_extract_data_invalid_response_path() {
-    let fdw = fdw_with_response_path(Some("/nonexistent"));
-    let mut resp = serde_json::json!({"data": [1, 2, 3]});
-    let err = fdw.extract_data(&mut resp).unwrap_err();
-    assert!(
-        err.contains("nonexistent"),
-        "Error should mention the missing path"
-    );
-    assert!(
-        err.contains("'data'"),
-        "Error should list available keys: {err}"
-    );
+fn test_extract_data_response_path_fallback_single_object() {
+    // response_path /features fails (single object, not FeatureCollection),
+    // falls back to single object auto-detection
+    let fdw = fdw_with_response_path(Some("/features"));
+    let mut resp = serde_json::json!({
+        "@type": "wx:ObservationStation",
+        "stationIdentifier": "KDEN",
+        "name": "Denver International Airport"
+    });
+    let rows = fdw.extract_data(&mut resp).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["stationIdentifier"], "KDEN");
+}
+
+#[test]
+fn test_extract_data_response_path_fallback_with_wrapper_key() {
+    // response_path /features fails, falls back to auto-detect "data" wrapper key
+    let fdw = fdw_with_response_path(Some("/features"));
+    let mut resp = serde_json::json!({
+        "data": [{"id": 1}, {"id": 2}],
+        "total": 2
+    });
+    let rows = fdw.extract_data(&mut resp).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["id"], 1);
 }
 
 #[test]
