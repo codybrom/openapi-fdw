@@ -160,3 +160,7 @@ impl OpenApiFdw {
             .map(ToString::to_string)
     }
 }
+
+#[cfg(test)]
+#[path = "response_tests.rs"]
+mod tests;

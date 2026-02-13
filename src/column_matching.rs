@@ -286,3 +286,7 @@ impl OpenApiFdw {
         Self::convert_json_to_cell(src, &cc.type_oid)
     }
 }
+
+#[cfg(test)]
+#[path = "column_matching_tests.rs"]
+mod tests;

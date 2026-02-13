@@ -408,3 +408,7 @@ impl OpenApiFdw {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "request_tests.rs"]
+mod tests;
