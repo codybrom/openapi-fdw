@@ -9,11 +9,13 @@ use crate::spec::{EndpointInfo, OpenApiSpec, Schema};
 
 /// Maps `OpenAPI` schema types to `PostgreSQL` type names
 pub fn openapi_to_pg_type(schema: &Schema, spec: &OpenApiSpec) -> &'static str {
-    // First resolve the schema if it's a reference
+    // Resolve $ref if present; otherwise borrow the original (no clone).
+    let owned;
     let resolved = if schema.reference.is_some() {
-        spec.resolve_schema(schema)
+        owned = spec.resolve_schema(schema);
+        &owned
     } else {
-        schema.clone()
+        schema
     };
 
     match resolved.schema_type.as_deref() {

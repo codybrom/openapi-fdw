@@ -371,7 +371,7 @@ impl OpenApiFdw {
             }
 
             // Skip the rowid column
-            if field_lower == self.rowid_col.to_lowercase() {
+            if field_lower == self.rowid_col {
                 continue;
             }
 
@@ -428,11 +428,11 @@ impl OpenApiFdw {
         // Only if endpoint doesn't already have path params and rowid qual exists
         if path_params_used.is_empty() {
             if let Some(id_qual) = quals.iter().find(|q| {
-                q.field().to_lowercase() == self.rowid_col.to_lowercase() && q.operator() == "="
+                q.field().to_lowercase() == self.rowid_col && q.operator() == "="
             }) {
                 if let Some(id) = Self::qual_value_to_string(id_qual) {
                     self.injected_params
-                        .insert(self.rowid_col.to_lowercase(), id.clone());
+                        .insert(self.rowid_col.clone(), id.clone());
                     return Ok(format!("{}{}/{}", self.base_url, endpoint, id));
                 }
             }
@@ -1067,7 +1067,7 @@ impl Guest for OpenApiFdw {
 
         // Get table options
         this.endpoint = opts.require("endpoint")?;
-        this.rowid_col = opts.require_or("rowid_column", "id");
+        this.rowid_col = opts.require_or("rowid_column", "id").to_lowercase();
 
         // HTTP method (default GET, case-insensitive)
         this.method = match opts.get("method") {
