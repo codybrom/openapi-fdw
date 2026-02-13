@@ -904,7 +904,7 @@ fn test_json_to_cell_json_array() {
 
 #[test]
 fn test_json_to_cell_path_param_injection() {
-    // When a column is a path param, its value is injected from path_params
+    // When a column is a path param, its value is injected from injected_params
     let mut fdw = OpenApiFdw {
         cached_columns: vec![CachedColumn {
             name: "user_id".to_string(),
@@ -916,7 +916,7 @@ fn test_json_to_cell_path_param_injection() {
         column_key_map: vec![None],
         ..Default::default()
     };
-    fdw.path_params
+    fdw.injected_params
         .insert("user_id".to_string(), "42".to_string());
 
     let obj = serde_json::json!({"title": "Post Title"});
@@ -941,7 +941,8 @@ fn test_json_to_cell_path_param_type_coercion() {
         column_key_map: vec![None],
         ..Default::default()
     };
-    fdw.path_params.insert("id".to_string(), "123".to_string());
+    fdw.injected_params
+        .insert("id".to_string(), "123".to_string());
 
     let obj = serde_json::json!({});
     let cell = fdw.json_to_cell_cached(&obj, 0).unwrap();
@@ -1566,7 +1567,7 @@ fn test_json_to_cell_path_param_bool_coercion() {
         column_key_map: vec![None],
         ..Default::default()
     };
-    fdw.path_params
+    fdw.injected_params
         .insert("active".to_string(), "true".to_string());
 
     let obj = serde_json::json!({});
@@ -1588,7 +1589,7 @@ fn test_json_to_cell_path_param_f64_coercion() {
         column_key_map: vec![None],
         ..Default::default()
     };
-    fdw.path_params
+    fdw.injected_params
         .insert("lat".to_string(), "37.7749".to_string());
 
     let obj = serde_json::json!({});
@@ -1614,7 +1615,7 @@ fn test_json_to_cell_path_param_invalid_number_fallback() {
         column_key_map: vec![None],
         ..Default::default()
     };
-    fdw.path_params
+    fdw.injected_params
         .insert("id".to_string(), "not-a-number".to_string());
 
     let obj = serde_json::json!({});
@@ -1640,7 +1641,7 @@ fn test_json_to_cell_path_param_json_type() {
         column_key_map: vec![None],
         ..Default::default()
     };
-    fdw.path_params
+    fdw.injected_params
         .insert("filter".to_string(), r#"{"status":"active"}"#.to_string());
 
     let obj = serde_json::json!({});

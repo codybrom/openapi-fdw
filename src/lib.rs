@@ -92,8 +92,8 @@ struct OpenApiFdw {
     // Schema generation options
     include_attrs: bool,
 
-    // Path parameters extracted from WHERE clause (for injecting back into rows)
-    path_params: std::collections::HashMap<String, String>,
+    // Qual values injected as URL path/query params (for injecting back into rows)
+    injected_params: std::collections::HashMap<String, String>,
 
     // Data buffers
     src_rows: Vec<JsonValue>,
@@ -134,7 +134,7 @@ impl Default for OpenApiFdw {
             next_url: None,
             api_key_query: None,
             include_attrs: false,
-            path_params: std::collections::HashMap::new(),
+            injected_params: std::collections::HashMap::new(),
             src_rows: Vec::new(),
             src_idx: 0,
             cached_columns: Vec::new(),
@@ -252,15 +252,18 @@ impl OpenApiFdw {
 
     /// Substitute path parameters in endpoint template from quals.
     ///
+    /// Writes substituted values into `injected` so they can be re-injected
+    /// into result rows (ensuring PostgreSQL's post-filter passes).
+    ///
     /// Returns (resolved_endpoint, path_params_used) where path_params_used
     /// contains lowercase names of parameters that were substituted.
     ///
     /// # Errors
     /// Returns an error if required path parameters are missing from quals.
     fn substitute_path_params(
-        &mut self,
         endpoint: &str,
         quals: &[bindings::supabase::wrappers::types::Qual],
+        injected: &mut std::collections::HashMap<String, String>,
     ) -> Result<(String, Vec<String>), String> {
         if !endpoint.contains('{') {
             return Ok((endpoint.to_string(), Vec::new()));
@@ -296,7 +299,7 @@ impl OpenApiFdw {
                 if let Some(val) = value {
                     path_params_used.push(param_lower.clone());
                     // Store the path param for injection into rows (unencoded for PostgreSQL filter)
-                    self.path_params.insert(param_lower, val.clone());
+                    injected.insert(param_lower, val.clone());
                     endpoint = format!(
                         "{}{}{}",
                         &endpoint[..start],
@@ -332,14 +335,17 @@ impl OpenApiFdw {
 
     /// Build query parameters from pagination state, quals, and API key.
     ///
-    /// Excludes path parameters and rowid column from query params.
+    /// Returns (url_params, injected_entries) where injected_entries are
+    /// qual values to merge into `self.injected_params` for row injection.
+    /// Excludes path parameters and rowid column.
     fn build_query_params(
-        &mut self,
+        &self,
         quals: &[bindings::supabase::wrappers::types::Qual],
         path_params_used: &[String],
-    ) -> Vec<String> {
+    ) -> (Vec<String>, Vec<(String, String)>) {
         // Pre-allocate for cursor + page_size + quals + api_key
         let mut params = Vec::with_capacity(quals.len() + 3);
+        let mut injected_entries = Vec::new();
 
         // Add pagination cursor if we have one
         if let Some(ref cursor) = self.next_cursor {
@@ -370,9 +376,9 @@ impl OpenApiFdw {
             }
 
             if let Some(value) = Self::qual_value_to_string(qual) {
-                // Store query param for injection back into rows
+                // Track for injection back into rows
                 // (so PostgreSQL's WHERE filter passes even if the API doesn't echo it back)
-                self.path_params.insert(field_lower, value.clone());
+                injected_entries.push((field_lower, value.clone()));
                 params.push(format!(
                     "{}={}",
                     urlencoding::encode(&qual.field()),
@@ -390,12 +396,12 @@ impl OpenApiFdw {
             ));
         }
 
-        params
+        (params, injected_entries)
     }
 
     /// Build the URL for a request, handling path parameters and pagination.
     ///
-    /// Updates `self.path_params` in place (avoids cloning on pagination).
+    /// Updates `self.injected_params` in place (avoids cloning on pagination).
     ///
     /// Supports endpoint templates like:
     /// - `/users/{user_id}/posts`
@@ -407,17 +413,16 @@ impl OpenApiFdw {
     /// # Errors
     /// Returns an error if required path parameters are missing from the WHERE clause.
     fn build_url(&mut self, ctx: &Context) -> Result<String, String> {
-        // Use next_url for pagination if available (path_params unchanged)
+        // Use next_url for pagination if available (injected_params unchanged)
         if let Some(ref next_url) = self.next_url {
             return Ok(self.resolve_pagination_url(next_url));
         }
 
         let quals = ctx.get_quals();
 
-        // Substitute path parameters (clone endpoint to avoid borrow conflict)
-        let endpoint_template = self.endpoint.clone();
+        // Substitute path parameters (no self borrow — takes &mut injected_params directly)
         let (endpoint, path_params_used) =
-            self.substitute_path_params(&endpoint_template, &quals)?;
+            Self::substitute_path_params(&self.endpoint, &quals, &mut self.injected_params)?;
 
         // Check for rowid pushdown for single-resource access
         // Only if endpoint doesn't already have path params and rowid qual exists
@@ -426,8 +431,7 @@ impl OpenApiFdw {
                 q.field().to_lowercase() == self.rowid_col.to_lowercase() && q.operator() == "="
             }) {
                 if let Some(id) = Self::qual_value_to_string(id_qual) {
-                    // Store rowid as path param too
-                    self.path_params
+                    self.injected_params
                         .insert(self.rowid_col.to_lowercase(), id.clone());
                     return Ok(format!("{}{}/{}", self.base_url, endpoint, id));
                 }
@@ -435,7 +439,8 @@ impl OpenApiFdw {
         }
 
         // Build query parameters
-        let params = self.build_query_params(&quals, &path_params_used);
+        let (params, injected_entries) = self.build_query_params(&quals, &path_params_used);
+        self.injected_params.extend(injected_entries);
 
         // Assemble final URL
         let mut url = format!("{}{}", self.base_url, endpoint);
@@ -840,7 +845,7 @@ impl OpenApiFdw {
 
         // If this column was used as a query/path parameter, inject the WHERE clause
         // value directly. Coerce to target column type to avoid type mismatches.
-        if let Some(value) = self.path_params.get(&cc.lower_name) {
+        if let Some(value) = self.injected_params.get(&cc.lower_name) {
             let cell = Self::convert_string_to_cell(value, &cc.type_oid);
             return Ok(cell.or_else(|| Some(Cell::String(value.clone()))));
         }
@@ -1064,9 +1069,9 @@ impl Guest for OpenApiFdw {
         this.endpoint = opts.require("endpoint")?;
         this.rowid_col = opts.require_or("rowid_column", "id");
 
-        // HTTP method (default GET)
-        this.method = match opts.get("method").as_deref() {
-            Some("POST") | Some("post") => http::Method::Post,
+        // HTTP method (default GET, case-insensitive)
+        this.method = match opts.get("method") {
+            Some(m) if m.eq_ignore_ascii_case("POST") => http::Method::Post,
             _ => http::Method::Get,
         };
 
@@ -1096,7 +1101,7 @@ impl Guest for OpenApiFdw {
         // Reset pagination and path param state
         this.next_cursor = None;
         this.next_url = None;
-        this.path_params.clear();
+        this.injected_params.clear();
 
         // Capture limit for early pagination stop
         // Note: Postgres handles offset locally, so we need offset + count total rows

@@ -118,7 +118,7 @@ Despite the overhead, OpenAPI FDW provides value when:
    - Eliminates 50% of allocations in date/timestamp columns
 
 4. **HashMap pre-allocation**
-   - `substitute_path_params`: 2× quals capacity
+   - `substitute_path_params`: 2× quals capacity (injected_params)
    - `build_query_params`: quals + 3 capacity
    - Eliminates rehashing during URL construction
 
