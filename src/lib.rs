@@ -87,6 +87,12 @@ struct OpenApiFdw {
     next_cursor: Option<String>,
     next_url: Option<String>,
 
+    // Pagination safety (loop detection)
+    max_pages: usize,
+    pages_fetched: usize,
+    prev_cursor: Option<String>,
+    prev_url: Option<String>,
+
     // API key as query parameter (when api_key_location = 'query')
     api_key_query: Option<(String, String)>,
 
@@ -136,6 +142,10 @@ impl Default for OpenApiFdw {
             page_size_param: String::new(),
             next_cursor: None,
             next_url: None,
+            max_pages: 1000,
+            pages_fetched: 0,
+            prev_cursor: None,
+            prev_url: None,
             api_key_query: None,
             include_attrs: false,
             injected_params: HashMap::new(),
@@ -1092,6 +1102,13 @@ impl Guest for OpenApiFdw {
         this.page_size_param = opts.require_or("page_size_param", "limit");
         this.cursor_param = opts.require_or("cursor_param", "after");
 
+        // Maximum pages per scan (default 1000, prevents infinite pagination loops)
+        if let Some(s) = opts.get("max_pages") {
+            this.max_pages = s
+                .parse()
+                .map_err(|_| format!("Invalid value for 'max_pages': '{s}'"))?;
+        }
+
         // Maximum response body size (default 50 MiB)
         if let Some(s) = opts.get("max_response_bytes") {
             this.max_response_bytes = s
@@ -1149,6 +1166,9 @@ impl Guest for OpenApiFdw {
         // Reset pagination and path param state
         this.next_cursor = None;
         this.next_url = None;
+        this.pages_fetched = 0;
+        this.prev_cursor = None;
+        this.prev_url = None;
         this.injected_params.clear();
 
         // Capture limit for early pagination stop
@@ -1181,6 +1201,9 @@ impl Guest for OpenApiFdw {
 
         // Make initial request
         this.make_request(ctx)?;
+        this.pages_fetched = 1;
+        this.prev_cursor.clone_from(&this.next_cursor);
+        this.prev_url.clone_from(&this.next_url);
 
         Ok(())
     }
@@ -1205,7 +1228,32 @@ impl Guest for OpenApiFdw {
                 }
             }
 
+            // Pagination safety: detect loops and enforce page limit
+            if this.pages_fetched >= this.max_pages {
+                utils::report_warning(&format!(
+                    "Pagination stopped after {} pages (max_pages limit). \
+                     Increase max_pages server option if needed.",
+                    this.max_pages
+                ));
+                return Ok(None);
+            }
+            if this.next_cursor.is_some() && this.next_cursor == this.prev_cursor {
+                utils::report_warning(
+                    "Pagination stopped: duplicate cursor detected (possible infinite loop).",
+                );
+                return Ok(None);
+            }
+            if this.next_url.is_some() && this.next_url == this.prev_url {
+                utils::report_warning(
+                    "Pagination stopped: duplicate URL detected (possible infinite loop).",
+                );
+                return Ok(None);
+            }
+            this.prev_cursor.clone_from(&this.next_cursor);
+            this.prev_url.clone_from(&this.next_url);
+
             // Fetch next page
+            this.pages_fetched += 1;
             this.make_request(ctx)?;
 
             // If still no data after fetch, we're done
@@ -1238,6 +1286,9 @@ impl Guest for OpenApiFdw {
         let this = Self::this_mut();
         this.next_cursor = None;
         this.next_url = None;
+        this.pages_fetched = 0;
+        this.prev_cursor = None;
+        this.prev_url = None;
         this.consumed_row_cnt = 0;
         this.make_request(ctx)
     }
