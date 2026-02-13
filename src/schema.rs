@@ -85,7 +85,7 @@ pub fn extract_columns(schema: &Schema, spec: &OpenApiSpec, include_attrs: bool)
                 if *count > 0 {
                     col_name = format!("{col_name}_{count}");
                 }
-                *seen.get_mut(&sanitize_column_name(name)).unwrap() += 1;
+                *count += 1;
 
                 columns.push(ColumnDef {
                     name: col_name,
