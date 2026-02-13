@@ -726,89 +726,11 @@ impl OpenApiFdw {
         };
     }
 
-    /// Convert a JSON value to a Cell using cached column metadata and pre-resolved key map.
+    /// Convert a JSON value to a Cell based on the target PostgreSQL type.
     ///
-    /// Uses `CachedColumn` fields instead of WASM resource methods, and the pre-built
-    /// `column_key_map` for O(1) JSON key lookup instead of per-row 3-step matching.
-    fn json_to_cell_cached(
-        &self,
-        src_row: &JsonValue,
-        col_idx: usize,
-    ) -> Result<Option<Cell>, FdwError> {
-        let cc = &self.cached_columns[col_idx];
-
-        // Special handling for 'attrs' column - returns entire row as JSON
-        if cc.name == "attrs" {
-            return Ok(Some(Cell::Json(src_row.to_string())));
-        }
-
-        // If this column was used as a query/path parameter, inject the WHERE clause
-        // value directly. Coerce to target column type to avoid type mismatches.
-        if let Some(value) = self.path_params.get(&cc.lower_name) {
-            let cell = match &cc.type_oid {
-                TypeOid::Bool => value.parse::<bool>().ok().map(Cell::Bool),
-                TypeOid::I8 => value.parse::<i8>().ok().map(Cell::I8),
-                TypeOid::I16 => value.parse::<i16>().ok().map(Cell::I16),
-                TypeOid::I32 => value.parse::<i32>().ok().map(Cell::I32),
-                TypeOid::I64 => value.parse::<i64>().ok().map(Cell::I64),
-                #[allow(clippy::cast_possible_truncation)]
-                TypeOid::F32 => value.parse::<f64>().ok().map(|v| Cell::F32(v as f32)),
-                TypeOid::F64 => value.parse::<f64>().ok().map(Cell::F64),
-                TypeOid::Numeric => value.parse::<f64>().ok().map(Cell::Numeric),
-                TypeOid::Date => time::parse_from_rfc3339(&Self::normalize_datetime(value))
-                    .ok()
-                    .map(|ts| Cell::Date(ts / 1_000_000)),
-                TypeOid::Timestamp => time::parse_from_rfc3339(&Self::normalize_datetime(value))
-                    .ok()
-                    .map(Cell::Timestamp),
-                TypeOid::Timestamptz => time::parse_from_rfc3339(&Self::normalize_datetime(value))
-                    .ok()
-                    .map(Cell::Timestamptz),
-                TypeOid::Json => Some(Cell::Json(value.clone())),
-                _ => Some(Cell::String(value.clone())),
-            };
-            return Ok(cell.or_else(|| Some(Cell::String(value.clone()))));
-        }
-
-        // Use pre-resolved key from column_key_map for O(1) lookup
-        let src = src_row.as_object().and_then(|obj| {
-            match self.column_key_map.get(col_idx) {
-                Some(Some(KeyMatch::Exact)) => obj.get(&cc.name),
-                Some(Some(KeyMatch::CamelCase)) => obj.get(&cc.camel_name),
-                Some(Some(KeyMatch::CaseInsensitive(key))) => obj.get(key),
-                _ => {
-                    // Fallback: 4-step matching for heterogeneous row shapes
-                    obj.get(&cc.name)
-                        .or_else(|| obj.get(&cc.camel_name))
-                        .or_else(|| {
-                            obj.iter()
-                                .find(|(k, _)| k.to_lowercase() == cc.lower_name)
-                                .map(|(_, v)| v)
-                        })
-                        .or_else(|| {
-                            // Normalized: strip non-alnum, compare (handles @-keys, dots, etc.)
-                            obj.iter()
-                                .find(|(k, _)| {
-                                    let key_alnum: String = k
-                                        .chars()
-                                        .filter(|c| c.is_alphanumeric())
-                                        .collect::<String>()
-                                        .to_lowercase();
-                                    key_alnum == cc.alnum_name
-                                })
-                                .map(|(_, v)| v)
-                        })
-                }
-            }
-        });
-
-        let src = match src {
-            Some(v) if !v.is_null() => v,
-            _ => return Ok(None),
-        };
-
-        // Type conversion based on target column type
-        let cell = match &cc.type_oid {
+    /// Handles type coercion, date/time parsing, and numeric conversions.
+    fn convert_json_to_cell(src: &JsonValue, type_oid: &TypeOid) -> Result<Option<Cell>, FdwError> {
+        let cell = match type_oid {
             TypeOid::Bool => src.as_bool().map(Cell::Bool),
             TypeOid::I8 => src
                 .as_i64()
@@ -865,6 +787,97 @@ impl OpenApiFdw {
         };
 
         Ok(cell)
+    }
+
+    /// Convert a string value from path/query params to a Cell based on target type.
+    ///
+    /// Used for injecting WHERE clause values that were used as URL parameters.
+    fn convert_string_to_cell(value: &str, type_oid: &TypeOid) -> Option<Cell> {
+        match type_oid {
+            TypeOid::Bool => value.parse::<bool>().ok().map(Cell::Bool),
+            TypeOid::I8 => value.parse::<i8>().ok().map(Cell::I8),
+            TypeOid::I16 => value.parse::<i16>().ok().map(Cell::I16),
+            TypeOid::I32 => value.parse::<i32>().ok().map(Cell::I32),
+            TypeOid::I64 => value.parse::<i64>().ok().map(Cell::I64),
+            #[allow(clippy::cast_possible_truncation)]
+            TypeOid::F32 => value.parse::<f64>().ok().map(|v| Cell::F32(v as f32)),
+            TypeOid::F64 => value.parse::<f64>().ok().map(Cell::F64),
+            TypeOid::Numeric => value.parse::<f64>().ok().map(Cell::Numeric),
+            TypeOid::Date => time::parse_from_rfc3339(&Self::normalize_datetime(value))
+                .ok()
+                .map(|ts| Cell::Date(ts / 1_000_000)),
+            TypeOid::Timestamp => time::parse_from_rfc3339(&Self::normalize_datetime(value))
+                .ok()
+                .map(Cell::Timestamp),
+            TypeOid::Timestamptz => time::parse_from_rfc3339(&Self::normalize_datetime(value))
+                .ok()
+                .map(Cell::Timestamptz),
+            TypeOid::Json => Some(Cell::Json(value.to_string())),
+            _ => Some(Cell::String(value.to_string())),
+        }
+    }
+
+    /// Convert a JSON value to a Cell using cached column metadata and pre-resolved key map.
+    ///
+    /// Uses `CachedColumn` fields instead of WASM resource methods, and the pre-built
+    /// `column_key_map` for O(1) JSON key lookup instead of per-row 3-step matching.
+    fn json_to_cell_cached(
+        &self,
+        src_row: &JsonValue,
+        col_idx: usize,
+    ) -> Result<Option<Cell>, FdwError> {
+        let cc = &self.cached_columns[col_idx];
+
+        // Special handling for 'attrs' column - returns entire row as JSON
+        if cc.name == "attrs" {
+            return Ok(Some(Cell::Json(src_row.to_string())));
+        }
+
+        // If this column was used as a query/path parameter, inject the WHERE clause
+        // value directly. Coerce to target column type to avoid type mismatches.
+        if let Some(value) = self.path_params.get(&cc.lower_name) {
+            let cell = Self::convert_string_to_cell(value, &cc.type_oid);
+            return Ok(cell.or_else(|| Some(Cell::String(value.clone()))));
+        }
+
+        // Use pre-resolved key from column_key_map for O(1) lookup
+        let src = src_row.as_object().and_then(|obj| {
+            match self.column_key_map.get(col_idx) {
+                Some(Some(KeyMatch::Exact)) => obj.get(&cc.name),
+                Some(Some(KeyMatch::CamelCase)) => obj.get(&cc.camel_name),
+                Some(Some(KeyMatch::CaseInsensitive(key))) => obj.get(key),
+                _ => {
+                    // Fallback: 4-step matching for heterogeneous row shapes
+                    obj.get(&cc.name)
+                        .or_else(|| obj.get(&cc.camel_name))
+                        .or_else(|| {
+                            obj.iter()
+                                .find(|(k, _)| k.to_lowercase() == cc.lower_name)
+                                .map(|(_, v)| v)
+                        })
+                        .or_else(|| {
+                            // Normalized: strip non-alnum, compare (handles @-keys, dots, etc.)
+                            obj.iter()
+                                .find(|(k, _)| {
+                                    let key_alnum: String = k
+                                        .chars()
+                                        .filter(|c| c.is_alphanumeric())
+                                        .collect::<String>()
+                                        .to_lowercase();
+                                    key_alnum == cc.alnum_name
+                                })
+                                .map(|(_, v)| v)
+                        })
+                }
+            }
+        });
+
+        let src = match src {
+            Some(v) if !v.is_null() => v,
+            _ => return Ok(None),
+        };
+
+        Self::convert_json_to_cell(src, &cc.type_oid)
     }
 }
 
