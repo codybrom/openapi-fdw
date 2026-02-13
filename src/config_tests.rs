@@ -563,9 +563,10 @@ fn test_auth_unknown_location_defaults_to_header() {
 #[test]
 fn test_debug_redacts_headers() {
     let mut config = ServerConfig::default();
-    config
-        .headers
-        .push(("authorization".to_string(), "Bearer secret-token".to_string()));
+    config.headers.push((
+        "authorization".to_string(),
+        "Bearer secret-token".to_string(),
+    ));
     config
         .headers
         .push(("x-api-key".to_string(), "my-secret-key".to_string()));

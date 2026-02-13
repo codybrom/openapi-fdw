@@ -45,7 +45,10 @@ impl std::fmt::Debug for ServerConfig {
             .field("spec_url", &self.spec_url)
             .field(
                 "api_key_query",
-                &self.api_key_query.as_ref().map(|(k, _)| format!("{k}=[REDACTED]")),
+                &self
+                    .api_key_query
+                    .as_ref()
+                    .map(|(k, _)| format!("{k}=[REDACTED]")),
             )
             .field("include_attrs", &self.include_attrs)
             .field("page_size", &self.page_size)
