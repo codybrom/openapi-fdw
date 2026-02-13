@@ -190,7 +190,7 @@ impl OpenApiFdw {
         let mut injected_entries = Vec::new();
 
         // Add pagination cursor if we have one
-        if let Some(ref cursor) = self.next_cursor {
+        if let Some(ref cursor) = self.pagination.next_cursor {
             params.push(format!(
                 "{}={}",
                 self.cursor_param,
@@ -256,7 +256,7 @@ impl OpenApiFdw {
     /// Returns an error if required path parameters are missing from the WHERE clause.
     pub(crate) fn build_url(&mut self, ctx: &Context) -> Result<String, String> {
         // Use next_url for pagination if available (injected_params unchanged)
-        if let Some(ref next_url) = self.next_url {
+        if let Some(ref next_url) = self.pagination.next_url {
             return Ok(self.resolve_pagination_url(next_url));
         }
 
@@ -372,8 +372,7 @@ impl OpenApiFdw {
         if resp.status_code == 404 {
             self.src_rows = Vec::new();
             self.src_idx = 0;
-            self.next_cursor = None;
-            self.next_url = None;
+            self.pagination.clear_next();
             return Ok(());
         }
 

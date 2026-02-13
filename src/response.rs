@@ -83,16 +83,15 @@ impl OpenApiFdw {
 
     /// Handle pagination from the response
     pub(crate) fn handle_pagination(&mut self, resp: &JsonValue) {
-        self.next_cursor = None;
-        self.next_url = None;
+        self.pagination.clear_next();
 
         // Try configured cursor path first
         if !self.cursor_path.is_empty() {
             if let Some(value) = Self::extract_non_empty_string(resp, &self.cursor_path) {
                 if value.starts_with("http://") || value.starts_with("https://") {
-                    self.next_url = Some(value);
+                    self.pagination.next_url = Some(value);
                 } else {
-                    self.next_cursor = Some(value);
+                    self.pagination.next_cursor = Some(value);
                 }
                 return;
             }
@@ -117,7 +116,7 @@ impl OpenApiFdw {
         ];
         for path in &next_url_paths {
             if let Some(url) = Self::extract_non_empty_string(resp, path) {
-                self.next_url = Some(url);
+                self.pagination.next_url = Some(url);
                 return;
             }
         }
@@ -147,7 +146,7 @@ impl OpenApiFdw {
         ];
         for path in &cursor_paths {
             if let Some(cursor) = Self::extract_non_empty_string(resp, path) {
-                self.next_cursor = Some(cursor);
+                self.pagination.next_cursor = Some(cursor);
                 return;
             }
         }
