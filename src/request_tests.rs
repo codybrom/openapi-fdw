@@ -17,14 +17,18 @@ fn make_fdw_for_url(base_url: &str, endpoint: &str) -> OpenApiFdw {
 #[test]
 fn test_resolve_pagination_url_absolute_https() {
     let fdw = make_fdw_for_url("https://api.example.com", "/items");
-    let url = fdw.resolve_pagination_url("https://api.example.com/items?page=2&limit=10");
+    let url = fdw
+        .resolve_pagination_url("https://api.example.com/items?page=2&limit=10")
+        .unwrap();
     assert_eq!(url, "https://api.example.com/items?page=2&limit=10");
 }
 
 #[test]
 fn test_resolve_pagination_url_absolute_http() {
     let fdw = make_fdw_for_url("http://mockserver:1080", "/items");
-    let url = fdw.resolve_pagination_url("http://mockserver:1080/items?page=2");
+    let url = fdw
+        .resolve_pagination_url("http://mockserver:1080/items?page=2")
+        .unwrap();
     assert_eq!(url, "http://mockserver:1080/items?page=2");
 }
 
@@ -32,7 +36,7 @@ fn test_resolve_pagination_url_absolute_http() {
 fn test_resolve_pagination_url_query_only() {
     // "?page=2" should resolve against base_url + endpoint
     let fdw = make_fdw_for_url("https://api.example.com", "/items");
-    let url = fdw.resolve_pagination_url("?page=2");
+    let url = fdw.resolve_pagination_url("?page=2").unwrap();
     assert_eq!(url, "https://api.example.com/items?page=2");
 }
 
@@ -40,7 +44,7 @@ fn test_resolve_pagination_url_query_only() {
 fn test_resolve_pagination_url_query_only_strips_existing_query() {
     // If endpoint already has query params, only the path part is used
     let fdw = make_fdw_for_url("https://api.example.com", "/items?status=active");
-    let url = fdw.resolve_pagination_url("?page=2");
+    let url = fdw.resolve_pagination_url("?page=2").unwrap();
     assert_eq!(url, "https://api.example.com/items?page=2");
 }
 
@@ -48,7 +52,9 @@ fn test_resolve_pagination_url_query_only_strips_existing_query() {
 fn test_resolve_pagination_url_absolute_path() {
     // "/items?page=2" should resolve against base_url
     let fdw = make_fdw_for_url("https://api.example.com", "/old-endpoint");
-    let url = fdw.resolve_pagination_url("/items?page=2&limit=50");
+    let url = fdw
+        .resolve_pagination_url("/items?page=2&limit=50")
+        .unwrap();
     assert_eq!(url, "https://api.example.com/items?page=2&limit=50");
 }
 
@@ -56,14 +62,14 @@ fn test_resolve_pagination_url_absolute_path() {
 fn test_resolve_pagination_url_bare_relative() {
     // "page/2" should resolve against base_url/
     let fdw = make_fdw_for_url("https://api.example.com", "/items");
-    let url = fdw.resolve_pagination_url("page/2");
+    let url = fdw.resolve_pagination_url("page/2").unwrap();
     assert_eq!(url, "https://api.example.com/page/2");
 }
 
 #[test]
 fn test_resolve_pagination_url_empty_string() {
     let fdw = make_fdw_for_url("https://api.example.com", "/items");
-    let url = fdw.resolve_pagination_url("");
+    let url = fdw.resolve_pagination_url("").unwrap();
     assert_eq!(url, "https://api.example.com/");
 }
 
@@ -71,8 +77,167 @@ fn test_resolve_pagination_url_empty_string() {
 fn test_resolve_pagination_url_trailing_slash_base() {
     // base_url is already trimmed of trailing slash in init()
     let fdw = make_fdw_for_url("https://api.example.com", "/v2/items");
-    let url = fdw.resolve_pagination_url("/v2/items?offset=100");
+    let url = fdw
+        .resolve_pagination_url("/v2/items?offset=100")
+        .unwrap();
     assert_eq!(url, "https://api.example.com/v2/items?offset=100");
+}
+
+// --- Cross-origin pagination rejection ---
+
+#[test]
+fn test_resolve_pagination_url_cross_origin_rejected() {
+    let fdw = make_fdw_for_url("https://api.example.com", "/items");
+    let result = fdw.resolve_pagination_url("https://evil.com/exfiltrate?token=abc");
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.contains("origin mismatch"));
+    assert!(err.contains("credential leakage"));
+}
+
+#[test]
+fn test_resolve_pagination_url_cross_origin_different_subdomain() {
+    let fdw = make_fdw_for_url("https://api.example.com", "/items");
+    let result = fdw.resolve_pagination_url("https://cdn.example.com/items?page=2");
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_resolve_pagination_url_cross_origin_different_port() {
+    let fdw = make_fdw_for_url("https://api.example.com", "/items");
+    let result = fdw.resolve_pagination_url("https://api.example.com:8443/items?page=2");
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_resolve_pagination_url_cross_origin_http_vs_https() {
+    let fdw = make_fdw_for_url("https://api.example.com", "/items");
+    let result = fdw.resolve_pagination_url("http://api.example.com/items?page=2");
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_resolve_pagination_url_same_origin_with_path() {
+    let fdw = make_fdw_for_url("https://api.example.com", "/items");
+    let url = fdw
+        .resolve_pagination_url("https://api.example.com/v2/items?page=2")
+        .unwrap();
+    assert_eq!(url, "https://api.example.com/v2/items?page=2");
+}
+
+#[test]
+fn test_resolve_pagination_url_same_origin_with_port() {
+    let fdw = make_fdw_for_url("http://mockserver:1080", "/items");
+    let url = fdw
+        .resolve_pagination_url("http://mockserver:1080/next?cursor=abc")
+        .unwrap();
+    assert_eq!(url, "http://mockserver:1080/next?cursor=abc");
+}
+
+#[test]
+fn test_resolve_pagination_url_same_origin_case_insensitive() {
+    let fdw = make_fdw_for_url("https://API.Example.COM", "/items");
+    let url = fdw
+        .resolve_pagination_url("https://api.example.com/items?page=2")
+        .unwrap();
+    assert_eq!(url, "https://api.example.com/items?page=2");
+}
+
+// --- extract_origin tests ---
+
+#[test]
+fn test_extract_origin_https() {
+    assert_eq!(
+        extract_origin("https://api.example.com/items?page=2"),
+        "https://api.example.com"
+    );
+}
+
+#[test]
+fn test_extract_origin_with_port() {
+    assert_eq!(
+        extract_origin("http://localhost:8080/api/v1"),
+        "http://localhost:8080"
+    );
+}
+
+#[test]
+fn test_extract_origin_no_path() {
+    assert_eq!(
+        extract_origin("https://api.example.com"),
+        "https://api.example.com"
+    );
+}
+
+#[test]
+fn test_extract_origin_no_scheme() {
+    assert_eq!(extract_origin("api.example.com/items"), "api.example.com/items");
+}
+
+#[test]
+fn test_extract_origin_trailing_slash() {
+    assert_eq!(
+        extract_origin("https://api.example.com/"),
+        "https://api.example.com"
+    );
+}
+
+// --- redact_query_param tests ---
+
+#[test]
+fn test_redact_query_param_present() {
+    let url = "https://api.example.com/items?api_key=SECRET123&page=2";
+    let redacted = redact_query_param(url, "api_key");
+    assert_eq!(
+        redacted,
+        "https://api.example.com/items?api_key=[REDACTED]&page=2"
+    );
+    assert!(!redacted.contains("SECRET123"));
+}
+
+#[test]
+fn test_redact_query_param_at_end() {
+    let url = "https://api.example.com/items?page=2&api_key=SECRET123";
+    let redacted = redact_query_param(url, "api_key");
+    assert_eq!(
+        redacted,
+        "https://api.example.com/items?page=2&api_key=[REDACTED]"
+    );
+}
+
+#[test]
+fn test_redact_query_param_only_param() {
+    let url = "https://api.example.com/items?api_key=SECRET123";
+    let redacted = redact_query_param(url, "api_key");
+    assert_eq!(
+        redacted,
+        "https://api.example.com/items?api_key=[REDACTED]"
+    );
+}
+
+#[test]
+fn test_redact_query_param_not_present() {
+    let url = "https://api.example.com/items?page=2&limit=10";
+    let redacted = redact_query_param(url, "api_key");
+    assert_eq!(redacted, url);
+}
+
+#[test]
+fn test_redact_query_param_no_query_string() {
+    let url = "https://api.example.com/items";
+    let redacted = redact_query_param(url, "api_key");
+    assert_eq!(redacted, url);
+}
+
+#[test]
+fn test_redact_query_param_encoded_name() {
+    // urlencoding::encode("api key") = "api%20key"
+    let url = "https://api.example.com/items?api%20key=SECRET&page=2";
+    let redacted = redact_query_param(url, "api key");
+    assert_eq!(
+        redacted,
+        "https://api.example.com/items?api%20key=[REDACTED]&page=2"
+    );
 }
 
 // --- URL encoding security tests ---

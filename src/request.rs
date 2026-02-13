@@ -13,6 +13,36 @@ use crate::{FDW_NAME, OpenApiFdw};
 
 const RETRY_AFTER_HEADER: &str = "retry-after";
 
+/// Extract the origin (scheme://authority) from a URL for same-origin comparison.
+/// Returns everything up to (but not including) the first `/` after `://`.
+fn extract_origin(url: &str) -> &str {
+    if let Some(scheme_end) = url.find("://") {
+        let rest = &url[scheme_end + 3..];
+        if let Some(slash) = rest.find('/') {
+            &url[..scheme_end + 3 + slash]
+        } else {
+            url
+        }
+    } else {
+        url
+    }
+}
+
+/// Redact a query parameter value from a URL for safe logging.
+/// Replaces the value of the named parameter with `[REDACTED]`.
+fn redact_query_param(url: &str, param_name: &str) -> String {
+    let encoded_prefix = format!("{}=", urlencoding::encode(param_name));
+    if let Some(start) = url.find(&encoded_prefix) {
+        let value_start = start + encoded_prefix.len();
+        let value_end = url[value_start..]
+            .find('&')
+            .map_or(url.len(), |i| value_start + i);
+        format!("{}[REDACTED]{}", &url[..value_start], &url[value_end..])
+    } else {
+        url.to_string()
+    }
+}
+
 impl OpenApiFdw {
     /// Fetch and parse the `OpenAPI` spec
     pub(crate) fn fetch_spec(&mut self) -> Result<(), FdwError> {
@@ -82,20 +112,35 @@ impl OpenApiFdw {
     /// Resolve a relative or absolute pagination URL against the base URL and endpoint.
     ///
     /// Handles four forms of `next_url`:
-    /// - Absolute URLs (`http://...`, `https://...`) → used as-is
+    /// - Absolute URLs (`http://...`, `https://...`) → validated against `base_url` origin
     /// - Query-only (`?page=2`) → resolves against `base_url + endpoint`
     /// - Absolute paths (`/items?page=2`) → resolves against `base_url`
     /// - Bare relative paths (`page/2`) → resolves against `base_url/`
-    pub(crate) fn resolve_pagination_url(&self, next_url: &str) -> String {
+    ///
+    /// # Errors
+    /// Returns an error if an absolute pagination URL points to a different origin
+    /// than `base_url`, which would leak authentication credentials to a third party.
+    pub(crate) fn resolve_pagination_url(&self, next_url: &str) -> Result<String, String> {
         if next_url.starts_with("http://") || next_url.starts_with("https://") {
-            next_url.to_string()
+            let next_origin = extract_origin(next_url);
+            let base_origin = extract_origin(&self.config.base_url);
+            if !next_origin.eq_ignore_ascii_case(base_origin) {
+                return Err(format!(
+                    "Pagination URL origin mismatch: API returned '{next_origin}' \
+                     but base_url is '{base_origin}'. Cross-origin pagination URLs are \
+                     rejected to prevent credential leakage. If this API legitimately \
+                     uses a different host for pagination, set base_url to match \
+                     the pagination host."
+                ));
+            }
+            Ok(next_url.to_string())
         } else if next_url.starts_with('?') {
             let endpoint_base = self.endpoint.split('?').next().unwrap_or(&self.endpoint);
-            format!("{}{endpoint_base}{next_url}", self.config.base_url)
+            Ok(format!("{}{endpoint_base}{next_url}", self.config.base_url))
         } else if next_url.starts_with('/') {
-            format!("{}{next_url}", self.config.base_url)
+            Ok(format!("{}{next_url}", self.config.base_url))
         } else {
-            format!("{}/{next_url}", self.config.base_url)
+            Ok(format!("{}/{next_url}", self.config.base_url))
         }
     }
 
@@ -266,7 +311,7 @@ impl OpenApiFdw {
     pub(crate) fn build_url(&mut self, ctx: &Context) -> Result<String, String> {
         // Use next_url for pagination if available (injected_params unchanged)
         if let Some(next_url) = self.pagination.next.as_ref().and_then(|t| t.as_url()) {
-            return Ok(self.resolve_pagination_url(next_url));
+            return self.resolve_pagination_url(next_url);
         }
 
         let quals = ctx.get_quals();
@@ -364,6 +409,10 @@ impl OpenApiFdw {
         };
 
         if self.config.debug {
+            let log_url = match self.config.api_key_query {
+                Some((ref param_name, _)) => redact_query_param(&req.url, param_name),
+                None => req.url.clone(),
+            };
             crate::bindings::supabase::wrappers::utils::report_info(&format!(
                 "[openapi_fdw] HTTP {} {} -> {} ({} bytes)",
                 if matches!(req.method, http::Method::Post) {
@@ -371,7 +420,7 @@ impl OpenApiFdw {
                 } else {
                     "GET"
                 },
-                req.url,
+                log_url,
                 resp.status_code,
                 resp.body.len()
             ));

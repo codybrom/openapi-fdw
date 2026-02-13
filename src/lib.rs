@@ -394,6 +394,7 @@ impl Guest for OpenApiFdw {
         let this = Self::this_mut();
         this.pagination.reset();
         this.consumed_row_cnt = 0;
+        this.injected_params.clear();
         this.make_request(ctx)?;
         this.pagination.record_first_page();
         Ok(())
