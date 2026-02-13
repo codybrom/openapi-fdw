@@ -166,6 +166,31 @@ fn test_to_camel_case() {
     assert_eq!(to_camel_case(""), "");
 }
 
+// --- normalize_to_alnum tests ---
+
+#[test]
+fn test_normalize_to_alnum_basic() {
+    assert_eq!(normalize_to_alnum("hello"), "hello");
+    assert_eq!(normalize_to_alnum("Hello"), "hello");
+    assert_eq!(normalize_to_alnum(""), "");
+}
+
+#[test]
+fn test_normalize_to_alnum_special_chars() {
+    assert_eq!(normalize_to_alnum("@id"), "id");
+    assert_eq!(normalize_to_alnum("$oid"), "oid");
+    assert_eq!(normalize_to_alnum("user.name"), "username");
+    assert_eq!(normalize_to_alnum("user-name"), "username");
+    assert_eq!(normalize_to_alnum("_id"), "id");
+}
+
+#[test]
+fn test_normalize_to_alnum_mixed() {
+    assert_eq!(normalize_to_alnum("user_Name"), "username");
+    assert_eq!(normalize_to_alnum("@Type"), "type");
+    assert_eq!(normalize_to_alnum("123-abc"), "123abc");
+}
+
 // --- build_column_key_map tests ---
 
 /// Helper: create an FDW with cached columns and src_rows, then build key map
@@ -186,11 +211,7 @@ fn build_key_map(
             type_oid: TypeOid::String,
             camel_name: to_camel_case(name),
             lower_name: name.to_lowercase(),
-            alnum_name: name
-                .chars()
-                .filter(|c| c.is_alphanumeric())
-                .collect::<String>()
-                .to_lowercase(),
+            alnum_name: normalize_to_alnum(name),
         })
         .collect();
     fdw.build_column_key_map();
@@ -682,11 +703,7 @@ fn cell_from_json(
             type_oid: type_oid.clone(),
             camel_name: to_camel_case(col_name),
             lower_name: col_name.to_lowercase(),
-            alnum_name: col_name
-                .chars()
-                .filter(|c| c.is_alphanumeric())
-                .collect::<String>()
-                .to_lowercase(),
+            alnum_name: normalize_to_alnum(col_name),
         }],
         column_key_map: vec![Some(KeyMatch::Exact)],
         ..Default::default()

@@ -718,14 +718,7 @@ impl OpenApiFdw {
                         // Handles JSON-LD @-prefixed keys (@id↔_id), dotted names
                         // (user.name↔user_name), and other special-char properties.
                         obj.keys()
-                            .find(|k| {
-                                let key_alnum: String = k
-                                    .chars()
-                                    .filter(|c| c.is_alphanumeric())
-                                    .collect::<String>()
-                                    .to_lowercase();
-                                key_alnum == cc.alnum_name
-                            })
+                            .find(|k| normalize_to_alnum(k) == cc.alnum_name)
                             .cloned()
                             .map(KeyMatch::CaseInsensitive)
                     }
@@ -867,14 +860,7 @@ impl OpenApiFdw {
                         .or_else(|| {
                             // Normalized: strip non-alnum, compare (handles @-keys, dots, etc.)
                             obj.iter()
-                                .find(|(k, _)| {
-                                    let key_alnum: String = k
-                                        .chars()
-                                        .filter(|c| c.is_alphanumeric())
-                                        .collect::<String>()
-                                        .to_lowercase();
-                                    key_alnum == cc.alnum_name
-                                })
+                                .find(|(k, _)| normalize_to_alnum(k) == cc.alnum_name)
                                 .map(|(_, v)| v)
                         })
                 }
@@ -999,6 +985,17 @@ fn to_camel_case(s: &str) -> String {
     }
 
     result
+}
+
+/// Strip non-alphanumeric chars and lowercase for normalized matching.
+///
+/// Used to match JSON keys with special characters (`@id`, `user.name`, `$oid`)
+/// to sanitized SQL column names (`_id`, `user_name`, `_oid`).
+fn normalize_to_alnum(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect::<String>()
+        .to_lowercase()
 }
 
 impl Guest for OpenApiFdw {
@@ -1127,11 +1124,7 @@ impl Guest for OpenApiFdw {
                 let name = col.name();
                 let camel_name = to_camel_case(&name);
                 let lower_name = name.to_lowercase();
-                let alnum_name = name
-                    .chars()
-                    .filter(|c| c.is_alphanumeric())
-                    .collect::<String>()
-                    .to_lowercase();
+                let alnum_name = normalize_to_alnum(&name);
                 CachedColumn {
                     type_oid: col.type_oid(),
                     name,
