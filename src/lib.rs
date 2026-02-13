@@ -249,112 +249,93 @@ impl OpenApiFdw {
         }
     }
 
-    /// Build the URL for a request, handling path parameters and pagination.
+    /// Substitute path parameters in endpoint template from quals.
     ///
-    /// Updates `self.path_params` in place (avoids cloning on pagination).
-    ///
-    /// Supports endpoint templates like:
-    /// - `/users/{user_id}/posts`
-    /// - `/projects/{org}/{repo}/issues`
-    /// - `/resources/{type}/{id}`
-    ///
-    /// Path parameters are substituted from WHERE clause quals.
+    /// Returns (resolved_endpoint, path_params_used) where path_params_used
+    /// contains lowercase names of parameters that were substituted.
     ///
     /// # Errors
-    /// Returns an error if required path parameters are missing from the WHERE clause.
-    fn build_url(&mut self, ctx: &Context) -> Result<String, String> {
-        // Use next_url for pagination if available (path_params unchanged)
-        if let Some(ref next_url) = self.next_url {
-            return Ok(self.resolve_pagination_url(next_url));
+    /// Returns an error if required path parameters are missing from quals.
+    fn substitute_path_params(
+        &mut self,
+        endpoint: &str,
+        quals: &[bindings::supabase::wrappers::types::Qual],
+    ) -> Result<(String, Vec<String>), String> {
+        if !endpoint.contains('{') {
+            return Ok((endpoint.to_string(), Vec::new()));
         }
 
-        let quals = ctx.get_quals();
+        // Build a map of qual field -> value for path parameter substitution
+        let mut qual_map: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for qual in quals {
+            if let Some(value) = Self::qual_value_to_string(qual) {
+                // Store both original and lowercase versions for flexible matching
+                qual_map.insert(qual.field().to_lowercase(), value.clone());
+                qual_map.insert(qual.field(), value);
+            }
+        }
 
-        // Short-circuit: if endpoint has no {param} templates, skip qual map building
-        let has_path_params = self.endpoint.contains('{');
-
+        let mut endpoint = endpoint.to_string();
         let mut path_params_used: Vec<String> = Vec::new();
-        let mut endpoint = self.endpoint.clone();
+        let mut missing_params: Vec<String> = Vec::new();
 
-        if has_path_params {
-            // Build a map of qual field -> value for path parameter substitution
-            let mut qual_map: std::collections::HashMap<String, String> =
-                std::collections::HashMap::new();
-            for qual in &quals {
-                if let Some(value) = Self::qual_value_to_string(qual) {
-                    // Store both original and lowercase versions for flexible matching
-                    qual_map.insert(qual.field().to_lowercase(), value.clone());
-                    qual_map.insert(qual.field(), value);
-                }
-            }
+        // Find all {param} patterns and substitute
+        while let Some(start) = endpoint.find('{') {
+            if let Some(end) = endpoint[start..].find('}') {
+                let param_name = &endpoint[start + 1..start + end];
+                let param_lower = param_name.to_lowercase();
 
-            // Substitute path parameters in endpoint template
-            // e.g., /users/{user_id}/posts -> /users/123/posts
-            let mut missing_params: Vec<String> = Vec::new();
+                // Try to find matching qual (case-insensitive)
+                let value = qual_map
+                    .get(&param_lower)
+                    .or_else(|| qual_map.get(param_name));
 
-            // Find all {param} patterns and substitute
-            while let Some(start) = endpoint.find('{') {
-                if let Some(end) = endpoint[start..].find('}') {
-                    let param_name = &endpoint[start + 1..start + end];
-                    let param_lower = param_name.to_lowercase();
-
-                    // Try to find matching qual (case-insensitive)
-                    let value = qual_map
-                        .get(&param_lower)
-                        .or_else(|| qual_map.get(param_name));
-
-                    if let Some(val) = value {
-                        path_params_used.push(param_lower.clone());
-                        // Store the path param for injection into rows (unencoded for PostgreSQL filter)
-                        self.path_params.insert(param_lower.clone(), val.clone());
-                        endpoint = format!(
-                            "{}{}{}",
-                            &endpoint[..start],
-                            urlencoding::encode(val),
-                            &endpoint[start + end + 1..]
-                        );
-                    } else {
-                        // Track missing parameter and remove it from the endpoint to continue
-                        missing_params.push(param_name.to_string());
-                        endpoint =
-                            format!("{}{}", &endpoint[..start], &endpoint[start + end + 1..]);
-                    }
+                if let Some(val) = value {
+                    path_params_used.push(param_lower.clone());
+                    // Store the path param for injection into rows (unencoded for PostgreSQL filter)
+                    self.path_params.insert(param_lower, val.clone());
+                    endpoint = format!(
+                        "{}{}{}",
+                        &endpoint[..start],
+                        urlencoding::encode(val),
+                        &endpoint[start + end + 1..]
+                    );
                 } else {
-                    break;
+                    // Track missing parameter and remove it from the endpoint to continue
+                    missing_params.push(param_name.to_string());
+                    endpoint = format!("{}{}", &endpoint[..start], &endpoint[start + end + 1..]);
                 }
-            }
-
-            // Return error if any required path parameters are missing
-            if !missing_params.is_empty() {
-                return Err(format!(
-                    "Missing required path parameter(s) in WHERE clause: {}. \
-                     Add WHERE {} to your query.",
-                    missing_params.join(", "),
-                    missing_params
-                        .iter()
-                        .map(|p| format!("{p} = '<value>'"))
-                        .collect::<Vec<_>>()
-                        .join(" AND ")
-                ));
+            } else {
+                break;
             }
         }
 
-        // Check for rowid pushdown for single-resource access
-        // Only if endpoint doesn't already have path params and rowid qual exists
-        if path_params_used.is_empty() {
-            if let Some(id_qual) = quals.iter().find(|q| {
-                q.field().to_lowercase() == self.rowid_col.to_lowercase() && q.operator() == "="
-            }) {
-                if let Some(id) = Self::qual_value_to_string(id_qual) {
-                    // Store rowid as path param too
-                    self.path_params
-                        .insert(self.rowid_col.to_lowercase(), id.clone());
-                    return Ok(format!("{}{}/{}", self.base_url, endpoint, id));
-                }
-            }
+        // Return error if any required path parameters are missing
+        if !missing_params.is_empty() {
+            return Err(format!(
+                "Missing required path parameter(s) in WHERE clause: {}. \
+                 Add WHERE {} to your query.",
+                missing_params.join(", "),
+                missing_params
+                    .iter()
+                    .map(|p| format!("{p} = '<value>'"))
+                    .collect::<Vec<_>>()
+                    .join(" AND ")
+            ));
         }
 
-        let mut base = format!("{}{}", self.base_url, endpoint);
+        Ok((endpoint, path_params_used))
+    }
+
+    /// Build query parameters from pagination state, quals, and API key.
+    ///
+    /// Excludes path parameters and rowid column from query params.
+    fn build_query_params(
+        &mut self,
+        quals: &[bindings::supabase::wrappers::types::Qual],
+        path_params_used: &[String],
+    ) -> Vec<String> {
         let mut params = Vec::new();
 
         // Add pagination cursor if we have one
@@ -372,7 +353,7 @@ impl OpenApiFdw {
         }
 
         // Add remaining quals as query params (exclude path params and rowid)
-        for qual in &quals {
+        for qual in quals {
             let field_lower = qual.field().to_lowercase();
 
             // Skip if used as path param
@@ -406,13 +387,62 @@ impl OpenApiFdw {
             ));
         }
 
-        if !params.is_empty() {
-            let separator = if base.contains('?') { '&' } else { '?' };
-            base.push(separator);
-            base.push_str(&params.join("&"));
+        params
+    }
+
+    /// Build the URL for a request, handling path parameters and pagination.
+    ///
+    /// Updates `self.path_params` in place (avoids cloning on pagination).
+    ///
+    /// Supports endpoint templates like:
+    /// - `/users/{user_id}/posts`
+    /// - `/projects/{org}/{repo}/issues`
+    /// - `/resources/{type}/{id}`
+    ///
+    /// Path parameters are substituted from WHERE clause quals.
+    ///
+    /// # Errors
+    /// Returns an error if required path parameters are missing from the WHERE clause.
+    fn build_url(&mut self, ctx: &Context) -> Result<String, String> {
+        // Use next_url for pagination if available (path_params unchanged)
+        if let Some(ref next_url) = self.next_url {
+            return Ok(self.resolve_pagination_url(next_url));
         }
 
-        Ok(base)
+        let quals = ctx.get_quals();
+
+        // Substitute path parameters (clone endpoint to avoid borrow conflict)
+        let endpoint_template = self.endpoint.clone();
+        let (endpoint, path_params_used) =
+            self.substitute_path_params(&endpoint_template, &quals)?;
+
+        // Check for rowid pushdown for single-resource access
+        // Only if endpoint doesn't already have path params and rowid qual exists
+        if path_params_used.is_empty() {
+            if let Some(id_qual) = quals.iter().find(|q| {
+                q.field().to_lowercase() == self.rowid_col.to_lowercase() && q.operator() == "="
+            }) {
+                if let Some(id) = Self::qual_value_to_string(id_qual) {
+                    // Store rowid as path param too
+                    self.path_params
+                        .insert(self.rowid_col.to_lowercase(), id.clone());
+                    return Ok(format!("{}{}/{}", self.base_url, endpoint, id));
+                }
+            }
+        }
+
+        // Build query parameters
+        let params = self.build_query_params(&quals, &path_params_used);
+
+        // Assemble final URL
+        let mut url = format!("{}{}", self.base_url, endpoint);
+        if !params.is_empty() {
+            let separator = if url.contains('?') { '&' } else { '?' };
+            url.push(separator);
+            url.push_str(&params.join("&"));
+        }
+
+        Ok(url)
     }
 
     /// Make a request to the API with automatic rate limit handling
