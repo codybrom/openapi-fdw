@@ -77,9 +77,7 @@ fn test_resolve_pagination_url_empty_string() {
 fn test_resolve_pagination_url_trailing_slash_base() {
     // base_url is already trimmed of trailing slash in init()
     let fdw = make_fdw_for_url("https://api.example.com", "/v2/items");
-    let url = fdw
-        .resolve_pagination_url("/v2/items?offset=100")
-        .unwrap();
+    let url = fdw.resolve_pagination_url("/v2/items?offset=100").unwrap();
     assert_eq!(url, "https://api.example.com/v2/items?offset=100");
 }
 
@@ -171,7 +169,10 @@ fn test_extract_origin_no_path() {
 
 #[test]
 fn test_extract_origin_no_scheme() {
-    assert_eq!(extract_origin("api.example.com/items"), "api.example.com/items");
+    assert_eq!(
+        extract_origin("api.example.com/items"),
+        "api.example.com/items"
+    );
 }
 
 #[test]
@@ -209,10 +210,7 @@ fn test_redact_query_param_at_end() {
 fn test_redact_query_param_only_param() {
     let url = "https://api.example.com/items?api_key=SECRET123";
     let redacted = redact_query_param(url, "api_key");
-    assert_eq!(
-        redacted,
-        "https://api.example.com/items?api_key=[REDACTED]"
-    );
+    assert_eq!(redacted, "https://api.example.com/items?api_key=[REDACTED]");
 }
 
 #[test]

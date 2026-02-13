@@ -185,7 +185,9 @@ impl OpenApiFdw {
                     Some(wrap(ts))
                 } else {
                     // Unix timestamp (seconds since epoch) → microseconds
-                    src.as_i64().map(|epoch| wrap(epoch * 1_000_000))
+                    src.as_i64()
+                        .and_then(|epoch| epoch.checked_mul(1_000_000))
+                        .map(wrap)
                 }
             }
             TypeOid::Uuid => src.as_str().map(|v| Cell::String(v.to_owned())),

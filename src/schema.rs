@@ -73,7 +73,10 @@ pub fn extract_columns(schema: &Schema, spec: &OpenApiSpec, include_attrs: bool)
             // Track seen names to detect collisions after sanitization
             let mut seen: HashMap<String, usize> = HashMap::new();
 
-            for (name, prop_schema) in &schema.properties {
+            let mut sorted_props: Vec<_> = schema.properties.iter().collect();
+            sorted_props.sort_by_key(|(name, _)| *name);
+
+            for (name, prop_schema) in sorted_props {
                 // Skip writeOnly properties (e.g., "password") — not returned in GET responses
                 if prop_schema.write_only {
                     continue;
