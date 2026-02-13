@@ -433,7 +433,12 @@ impl OpenApiFdw {
                 if let Some(id) = Self::qual_value_to_string(id_qual) {
                     self.injected_params
                         .insert(self.rowid_col.clone(), id.clone());
-                    return Ok(format!("{}{}/{}", self.base_url, endpoint, id));
+                    return Ok(format!(
+                        "{}{}/{}",
+                        self.base_url,
+                        endpoint,
+                        urlencoding::encode(&id)
+                    ));
                 }
             }
         }

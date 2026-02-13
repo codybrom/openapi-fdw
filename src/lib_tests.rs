@@ -1787,3 +1787,44 @@ fn test_json_to_cell_json_bool_value() {
         panic!("Expected Json cell");
     }
 }
+
+// --- URL encoding security tests ---
+
+#[test]
+fn test_rowid_url_encoding_path_traversal() {
+    // Verify urlencoding::encode handles path traversal attempts
+    let malicious_id = "../admin";
+    let encoded = urlencoding::encode(malicious_id);
+    assert_eq!(encoded, "..%2Fadmin");
+    // Resulting URL would be /items/..%2Fadmin (safe) not /items/../admin (traversal)
+}
+
+#[test]
+fn test_rowid_url_encoding_query_injection() {
+    // Verify urlencoding::encode handles query injection attempts
+    let malicious_id = "123?admin=true";
+    let encoded = urlencoding::encode(malicious_id);
+    assert_eq!(encoded, "123%3Fadmin%3Dtrue");
+}
+
+#[test]
+fn test_rowid_url_encoding_special_chars() {
+    // Verify urlencoding::encode handles various URL-unsafe chars
+    let special = "id with spaces&more=stuff#fragment";
+    let encoded = urlencoding::encode(special);
+    assert!(!encoded.contains(' '));
+    assert!(!encoded.contains('&'));
+    assert!(!encoded.contains('='));
+    assert!(!encoded.contains('#'));
+}
+
+#[test]
+fn test_rowid_url_encoding_normal_ids() {
+    // Normal IDs should pass through unchanged
+    assert_eq!(urlencoding::encode("123"), "123");
+    assert_eq!(urlencoding::encode("abc-def"), "abc-def");
+    assert_eq!(
+        urlencoding::encode("550e8400-e29b-41d4-a716-446655440000"),
+        "550e8400-e29b-41d4-a716-446655440000"
+    );
+}
