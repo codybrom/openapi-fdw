@@ -201,23 +201,33 @@ impl ServerConfig {
         }
 
         if let Some(key) = api_key {
-            if api_key_location == "query" {
-                // API key sent as query parameter (e.g., ?api_key=xxx)
-                self.api_key_query = Some((api_key_header.to_string(), key));
-            } else if api_key_location == "cookie" {
-                // API key sent as cookie (e.g., Cookie: session=xxx)
-                self.headers
-                    .push(("cookie".to_owned(), format!("{api_key_header}={key}")));
-            } else {
-                // API key sent as header (default)
-                let header_value = match (api_key_header, &api_key_prefix) {
-                    ("Authorization", None) => format!("Bearer {key}"),
-                    (_, Some(p)) => format!("{p} {key}"),
-                    (_, None) => key,
-                };
+            match api_key_location {
+                "query" => {
+                    // API key sent as query parameter (e.g., ?api_key=xxx)
+                    self.api_key_query = Some((api_key_header.to_string(), key));
+                }
+                "cookie" => {
+                    // API key sent as cookie (e.g., Cookie: session=xxx)
+                    self.headers
+                        .push(("cookie".to_owned(), format!("{api_key_header}={key}")));
+                }
+                "header" => {
+                    // API key sent as header (default)
+                    let header_value = match (api_key_header, &api_key_prefix) {
+                        ("Authorization", None) => format!("Bearer {key}"),
+                        (_, Some(p)) => format!("{p} {key}"),
+                        (_, None) => key,
+                    };
 
-                self.headers
-                    .push((api_key_header.to_lowercase(), header_value));
+                    self.headers
+                        .push((api_key_header.to_lowercase(), header_value));
+                }
+                other => {
+                    return Err(format!(
+                        "Invalid api_key_location '{other}'. \
+                         Must be 'header', 'query', or 'cookie'."
+                    ));
+                }
             }
         }
 

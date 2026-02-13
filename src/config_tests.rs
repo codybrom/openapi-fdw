@@ -542,8 +542,7 @@ fn test_auth_api_key_preserves_existing_headers() {
 }
 
 #[test]
-fn test_auth_unknown_location_defaults_to_header() {
-    // Any location that isn't "query" or "cookie" falls through to header
+fn test_auth_explicit_header_location() {
     let mut config = ServerConfig::default();
     config
         .apply_auth(
@@ -556,6 +555,37 @@ fn test_auth_unknown_location_defaults_to_header() {
         .unwrap();
     assert_eq!(config.headers[0].0, "authorization");
     assert_eq!(config.headers[0].1, "Bearer key");
+}
+
+#[test]
+fn test_auth_unknown_location_returns_error() {
+    let mut config = ServerConfig::default();
+    let result = config.apply_auth(
+        Some("key".to_string()),
+        None,
+        "queery", // typo
+        "api_key",
+        None,
+    );
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.contains("Invalid api_key_location"));
+    assert!(err.contains("queery"));
+}
+
+#[test]
+fn test_auth_unknown_location_no_side_effects() {
+    let mut config = ServerConfig::default();
+    let _ = config.apply_auth(
+        Some("key".to_string()),
+        None,
+        "invalid",
+        "Authorization",
+        None,
+    );
+    // Error should not have added any headers or query params
+    assert!(config.headers.is_empty());
+    assert!(config.api_key_query.is_none());
 }
 
 // --- Debug impl redaction ---

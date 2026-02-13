@@ -54,11 +54,9 @@ impl OpenApiFdw {
                 body: String::default(),
             };
             let resp = http::get(&req)?;
-            http::error_for_status(&resp).map_err(|err| {
-                format!(
-                    "Failed to fetch OpenAPI spec (HTTP {}): {}",
-                    resp.status_code, err
-                )
+            http::error_for_status(&resp).map_err(|_| {
+                // Discard opaque error body — may contain URL with credentials
+                format!("Failed to fetch OpenAPI spec (HTTP {})", resp.status_code)
             })?;
 
             if resp.body.len() > self.config.max_response_bytes {
@@ -434,8 +432,16 @@ impl OpenApiFdw {
             return Ok(());
         }
 
-        http::error_for_status(&resp)
-            .map_err(|err| format!("HTTP {} error: {}", resp.status_code, err))?;
+        http::error_for_status(&resp).map_err(|_| {
+            // Discard the opaque error body from error_for_status — it may
+            // contain the full request URL, which leaks API key query params
+            // when api_key_location = 'query'.
+            format!(
+                "HTTP {} error from API endpoint ({})",
+                resp.status_code,
+                self.endpoint.split('?').next().unwrap_or(&self.endpoint)
+            )
+        })?;
 
         if resp.body.len() > self.config.max_response_bytes {
             return Err(format!(
