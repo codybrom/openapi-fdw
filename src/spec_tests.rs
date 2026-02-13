@@ -17,7 +17,7 @@ fn test_parse_minimal_spec() {
 fn test_endpoint_table_name() {
     let endpoint = EndpointInfo {
         path: "/api/v1/user-accounts".to_string(),
-        method: "GET".to_string(),
+        method: "GET",
         response_schema: None,
     };
     assert_eq!(endpoint.table_name(), "api_v1_user_accounts");
@@ -25,7 +25,7 @@ fn test_endpoint_table_name() {
     // Single segment
     let endpoint = EndpointInfo {
         path: "/users".to_string(),
-        method: "GET".to_string(),
+        method: "GET",
         response_schema: None,
     };
     assert_eq!(endpoint.table_name(), "users");
@@ -33,12 +33,12 @@ fn test_endpoint_table_name() {
     // Collision avoidance: different versions produce different names
     let v1 = EndpointInfo {
         path: "/v1/users".to_string(),
-        method: "GET".to_string(),
+        method: "GET",
         response_schema: None,
     };
     let v2 = EndpointInfo {
         path: "/v2/users".to_string(),
-        method: "GET".to_string(),
+        method: "GET",
         response_schema: None,
     };
     assert_ne!(v1.table_name(), v2.table_name());
@@ -46,7 +46,7 @@ fn test_endpoint_table_name() {
     // Empty path
     let endpoint = EndpointInfo {
         path: "/".to_string(),
-        method: "GET".to_string(),
+        method: "GET",
         response_schema: None,
     };
     assert_eq!(endpoint.table_name(), "unknown");
@@ -1060,7 +1060,7 @@ fn test_paths_without_get_include_post() {
 fn test_table_name_deeply_nested_path() {
     let endpoint = EndpointInfo {
         path: "/api/v2/projects/issues/comments".to_string(),
-        method: "GET".to_string(),
+        method: "GET",
         response_schema: None,
     };
     assert_eq!(endpoint.table_name(), "api_v2_projects_issues_comments");
@@ -1599,14 +1599,14 @@ fn test_post_endpoint_included() {
 fn test_post_endpoint_table_name_suffix() {
     let endpoint = EndpointInfo {
         path: "/search".to_string(),
-        method: "POST".to_string(),
+        method: "POST",
         response_schema: None,
     };
     assert_eq!(endpoint.table_name(), "search_post");
 
     let get_endpoint = EndpointInfo {
         path: "/search".to_string(),
-        method: "GET".to_string(),
+        method: "GET",
         response_schema: None,
     };
     assert_eq!(get_endpoint.table_name(), "search");

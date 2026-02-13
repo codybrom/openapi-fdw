@@ -19,7 +19,7 @@ use bindings::{
     supabase::wrappers::{
         http, stats, time,
         types::{
-            Cell, Context, FdwError, FdwResult, ImportForeignSchemaStmt, ImportSchemaType,
+            Cell, Context, FdwError, FdwResult, ImportForeignSchemaStmt, ImportSchemaType, Options,
             OptionsType, Row, TypeOid, Value,
         },
         utils,
@@ -194,17 +194,16 @@ impl OpenApiFdw {
 
             let spec_json: JsonValue =
                 serde_json::from_str(&resp.body).map_err(|e| e.to_string())?;
-            self.spec = Some(OpenApiSpec::from_json(spec_json)?);
+            let spec = OpenApiSpec::from_json(spec_json)?;
 
             // Use base_url from spec if not explicitly set
             if self.base_url.is_empty() {
-                if let Some(ref spec) = self.spec {
-                    if let Some(url) = spec.base_url() {
-                        self.base_url = url.trim_end_matches('/').to_string();
-                    }
+                if let Some(url) = spec.base_url() {
+                    self.base_url = url.trim_end_matches('/').to_string();
                 }
             }
 
+            self.spec = Some(spec);
             stats::inc_stats(FDW_NAME, stats::Metric::BytesIn, resp.body.len() as i64);
         }
         Ok(())
@@ -427,9 +426,10 @@ impl OpenApiFdw {
         // Check for rowid pushdown for single-resource access
         // Only if endpoint doesn't already have path params and rowid qual exists
         if path_params_used.is_empty() {
-            if let Some(id_qual) = quals.iter().find(|q| {
-                q.field().to_lowercase() == self.rowid_col && q.operator() == "="
-            }) {
+            if let Some(id_qual) = quals
+                .iter()
+                .find(|q| q.field().to_lowercase() == self.rowid_col && q.operator() == "=")
+            {
                 if let Some(id) = Self::qual_value_to_string(id_qual) {
                     self.injected_params
                         .insert(self.rowid_col.clone(), id.clone());
@@ -665,7 +665,7 @@ impl OpenApiFdw {
     /// `T00:00:00Z` to date-only strings so they parse correctly.
     ///
     /// Returns `Cow<str>` to avoid allocating when the string is already valid.
-    fn normalize_datetime(s: &str) -> Cow<str> {
+    fn normalize_datetime(s: &str) -> Cow<'_, str> {
         // Date-only: exactly 10 chars matching YYYY-MM-DD pattern
         if s.len() == 10 && s.as_bytes().get(4) == Some(&b'-') && s.as_bytes().get(7) == Some(&b'-')
         {
@@ -772,23 +772,18 @@ impl OpenApiFdw {
                     src.as_i64().map(Cell::Date)
                 }
             }
-            TypeOid::Timestamp => {
+            TypeOid::Timestamp | TypeOid::Timestamptz => {
+                let wrap: fn(i64) -> Cell = if matches!(type_oid, TypeOid::Timestamp) {
+                    Cell::Timestamp
+                } else {
+                    Cell::Timestamptz
+                };
                 if let Some(s) = src.as_str() {
                     let ts = time::parse_from_rfc3339(&Self::normalize_datetime(s))?;
-                    Some(Cell::Timestamp(ts))
+                    Some(wrap(ts))
                 } else {
                     // Unix timestamp (seconds since epoch) → microseconds
-                    src.as_i64().map(|epoch| Cell::Timestamp(epoch * 1_000_000))
-                }
-            }
-            TypeOid::Timestamptz => {
-                if let Some(s) = src.as_str() {
-                    let ts = time::parse_from_rfc3339(&Self::normalize_datetime(s))?;
-                    Some(Cell::Timestamptz(ts))
-                } else {
-                    // Unix timestamp (seconds since epoch) → microseconds
-                    src.as_i64()
-                        .map(|epoch| Cell::Timestamptz(epoch * 1_000_000))
+                    src.as_i64().map(|epoch| wrap(epoch * 1_000_000))
                 }
             }
             TypeOid::Uuid => src.as_str().map(|v| Cell::String(v.to_owned())),
@@ -816,12 +811,16 @@ impl OpenApiFdw {
             TypeOid::Date => time::parse_from_rfc3339(&Self::normalize_datetime(value))
                 .ok()
                 .map(|ts| Cell::Date(ts / 1_000_000)),
-            TypeOid::Timestamp => time::parse_from_rfc3339(&Self::normalize_datetime(value))
-                .ok()
-                .map(Cell::Timestamp),
-            TypeOid::Timestamptz => time::parse_from_rfc3339(&Self::normalize_datetime(value))
-                .ok()
-                .map(Cell::Timestamptz),
+            TypeOid::Timestamp | TypeOid::Timestamptz => {
+                let wrap: fn(i64) -> Cell = if matches!(type_oid, TypeOid::Timestamp) {
+                    Cell::Timestamp
+                } else {
+                    Cell::Timestamptz
+                };
+                time::parse_from_rfc3339(&Self::normalize_datetime(value))
+                    .ok()
+                    .map(wrap)
+            }
             TypeOid::Json => Some(Cell::Json(value.to_string())),
             _ => Some(Cell::String(value.to_string())),
         }
@@ -889,11 +888,103 @@ impl OpenApiFdw {
 
         Self::convert_json_to_cell(src, &cc.type_oid)
     }
+
+    /// Configure request headers from server options
+    fn configure_headers(&mut self, opts: &Options) -> FdwResult {
+        self.headers
+            .push(("content-type".to_owned(), "application/json".to_string()));
+
+        // Optional User-Agent header (some APIs require this for identification)
+        if let Some(user_agent) = opts.get("user_agent") {
+            self.headers.push(("user-agent".to_owned(), user_agent));
+        }
+
+        // Optional Accept header for content negotiation (JSON, XML, JSON-LD, GeoJSON etc.)
+        if let Some(accept) = opts.get("accept") {
+            self.headers.push(("accept".to_owned(), accept));
+        }
+
+        // Custom headers as JSON object: '{"Feature-Flags": "value", "X-Custom": "value"}'
+        if let Some(headers_json) = opts.get("headers") {
+            let headers: JsonMap<String, JsonValue> = serde_json::from_str(&headers_json)
+                .map_err(|e| format!("Invalid JSON for 'headers' option: {e}"))?;
+            for (key, value) in headers {
+                if let Some(v) = value.as_str() {
+                    self.headers.push((key.to_lowercase(), v.to_string()));
+                } else {
+                    return Err(format!(
+                        "Invalid non-string value for header '{key}' in 'headers' option"
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Configure authentication from server options
+    fn configure_auth(&mut self, opts: &Options) -> FdwResult {
+        // API Key authentication
+        let api_key = opts.get("api_key").or_else(|| {
+            opts.get("api_key_id")
+                .and_then(|key_id| utils::get_vault_secret(&key_id))
+        });
+
+        // Bearer token authentication (alternative to api_key)
+        let bearer_token = opts.get("bearer_token").or_else(|| {
+            opts.get("bearer_token_id")
+                .and_then(|token_id| utils::get_vault_secret(&token_id))
+        });
+
+        // Enforce mutual exclusivity — both would emit duplicate auth headers
+        if api_key.is_some() && bearer_token.is_some() {
+            return Err(
+                "Cannot use both api_key/api_key_id and bearer_token/bearer_token_id. \
+                 Choose one authentication method."
+                    .to_string(),
+            );
+        }
+
+        if let Some(key) = api_key {
+            let location = opts.require_or("api_key_location", "header");
+
+            if location == "query" {
+                // API key sent as query parameter (e.g., ?api_key=xxx)
+                let param_name = opts.require_or("api_key_header", "api_key");
+                self.api_key_query = Some((param_name, key));
+            } else if location == "cookie" {
+                // API key sent as cookie (e.g., Cookie: session=xxx)
+                let cookie_name = opts.require_or("api_key_header", "api_key");
+                self.headers
+                    .push(("cookie".to_owned(), format!("{cookie_name}={key}")));
+            } else {
+                // API key sent as header (default)
+                let header_name = opts.require_or("api_key_header", "Authorization");
+                let prefix = opts.get("api_key_prefix");
+
+                let header_value = match (header_name.as_str(), prefix) {
+                    ("Authorization", None) => format!("Bearer {key}"),
+                    (_, Some(p)) => format!("{p} {key}"),
+                    (_, None) => key,
+                };
+
+                self.headers
+                    .push((header_name.to_lowercase(), header_value));
+            }
+        }
+
+        if let Some(token) = bearer_token {
+            self.headers
+                .push(("authorization".to_owned(), format!("Bearer {token}")));
+        }
+
+        Ok(())
+    }
 }
 
 /// Convert `snake_case` to `camelCase`
 fn to_camel_case(s: &str) -> String {
-    let mut result = String::new();
+    let mut result = String::with_capacity(s.len());
     let mut capitalize_next = false;
 
     for c in s.chars() {
@@ -957,88 +1048,8 @@ impl Guest for OpenApiFdw {
             }
         }
 
-        // Set up headers
-        this.headers
-            .push(("content-type".to_owned(), "application/json".to_string()));
-
-        // Optional User-Agent header (some APIs require this for identification)
-        if let Some(user_agent) = opts.get("user_agent") {
-            this.headers.push(("user-agent".to_owned(), user_agent));
-        }
-
-        // Optional Accept header for content negotiation (JSON, XML, JSON-LD, GeoJSON etc.)
-        if let Some(accept) = opts.get("accept") {
-            this.headers.push(("accept".to_owned(), accept));
-        }
-
-        // Custom headers as JSON object: '{"Feature-Flags": "value", "X-Custom": "value"}'
-        if let Some(headers_json) = opts.get("headers") {
-            let headers: JsonMap<String, JsonValue> = serde_json::from_str(&headers_json)
-                .map_err(|e| format!("Invalid JSON for 'headers' option: {e}"))?;
-            for (key, value) in headers {
-                if let Some(v) = value.as_str() {
-                    this.headers.push((key.to_lowercase(), v.to_string()));
-                } else {
-                    return Err(format!(
-                        "Invalid non-string value for header '{key}' in 'headers' option"
-                    ));
-                }
-            }
-        }
-
-        // API Key authentication
-        let api_key = opts.get("api_key").or_else(|| {
-            opts.get("api_key_id")
-                .and_then(|key_id| utils::get_vault_secret(&key_id))
-        });
-
-        // Bearer token authentication (alternative to api_key)
-        let bearer_token = opts.get("bearer_token").or_else(|| {
-            opts.get("bearer_token_id")
-                .and_then(|token_id| utils::get_vault_secret(&token_id))
-        });
-
-        // Enforce mutual exclusivity — both would emit duplicate auth headers
-        if api_key.is_some() && bearer_token.is_some() {
-            return Err(
-                "Cannot use both api_key/api_key_id and bearer_token/bearer_token_id. \
-                 Choose one authentication method."
-                    .to_string(),
-            );
-        }
-
-        if let Some(key) = api_key {
-            let location = opts.require_or("api_key_location", "header");
-
-            if location == "query" {
-                // API key sent as query parameter (e.g., ?api_key=xxx)
-                let param_name = opts.require_or("api_key_header", "api_key");
-                this.api_key_query = Some((param_name, key));
-            } else if location == "cookie" {
-                // API key sent as cookie (e.g., Cookie: session=xxx)
-                let cookie_name = opts.require_or("api_key_header", "api_key");
-                this.headers
-                    .push(("cookie".to_owned(), format!("{cookie_name}={key}")));
-            } else {
-                // API key sent as header (default)
-                let header_name = opts.require_or("api_key_header", "Authorization");
-                let prefix = opts.get("api_key_prefix");
-
-                let header_value = match (header_name.as_str(), prefix) {
-                    ("Authorization", None) => format!("Bearer {key}"),
-                    (_, Some(p)) => format!("{p} {key}"),
-                    (_, None) => key,
-                };
-
-                this.headers
-                    .push((header_name.to_lowercase(), header_value));
-            }
-        }
-
-        if let Some(token) = bearer_token {
-            this.headers
-                .push(("authorization".to_owned(), format!("Bearer {token}")));
-        }
+        this.configure_headers(&opts)?;
+        this.configure_auth(&opts)?;
 
         // Pagination defaults (page_size=0 means no automatic limit parameter)
         this.page_size = match opts.get("page_size") {
@@ -1176,7 +1187,7 @@ impl Guest for OpenApiFdw {
             .object_path
             .as_ref()
             .map_or(src_row, |path| src_row.pointer(path).unwrap_or(src_row));
-        for (col_idx, _) in this.cached_columns.iter().enumerate() {
+        for col_idx in 0..this.cached_columns.len() {
             let cell = this.json_to_cell_cached(effective_row, col_idx)?;
             row.push(cell.as_ref());
         }

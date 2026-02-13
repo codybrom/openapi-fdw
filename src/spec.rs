@@ -111,7 +111,7 @@ struct Info {
 
 /// Server definition
 #[derive(Debug, Deserialize)]
-pub struct Server {
+pub(crate) struct Server {
     pub url: String,
     #[serde(default)]
     pub variables: HashMap<String, ServerVariable>,
@@ -119,13 +119,13 @@ pub struct Server {
 
 /// Server variable with a default value for URL template substitution
 #[derive(Debug, Deserialize)]
-pub struct ServerVariable {
+pub(crate) struct ServerVariable {
     pub default: String,
 }
 
 /// Path item (GET and POST operations are used for foreign tables)
 #[derive(Debug, Deserialize)]
-pub struct PathItem {
+pub(crate) struct PathItem {
     #[serde(default)]
     pub get: Option<Operation>,
     #[serde(default)]
@@ -135,14 +135,14 @@ pub struct PathItem {
 /// Operation definition
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Operation {
+pub(crate) struct Operation {
     #[serde(default)]
     pub responses: HashMap<String, Response>,
 }
 
 /// Response definition
 #[derive(Debug, Deserialize)]
-pub struct Response {
+pub(crate) struct Response {
     #[serde(rename = "$ref")]
     #[serde(default)]
     pub reference: Option<String>,
@@ -151,7 +151,7 @@ pub struct Response {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct MediaType {
+pub(crate) struct MediaType {
     #[serde(default)]
     pub schema: Option<Schema>,
 }
@@ -174,7 +174,7 @@ pub struct Schema {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct Components {
+pub(crate) struct Components {
     #[serde(default)]
     pub schemas: HashMap<String, Schema>,
     #[serde(default)]
@@ -245,7 +245,7 @@ impl OpenApiSpec {
                 let response_schema = self.get_response_schema(op);
                 endpoints.push(EndpointInfo {
                     path: path.clone(),
-                    method: "GET".to_string(),
+                    method: "GET",
                     response_schema,
                 });
             }
@@ -254,13 +254,13 @@ impl OpenApiSpec {
                 let response_schema = self.get_response_schema(op);
                 endpoints.push(EndpointInfo {
                     path: path.clone(),
-                    method: "POST".to_string(),
+                    method: "POST",
                     response_schema,
                 });
             }
         }
 
-        endpoints.sort_by(|a, b| a.path.cmp(&b.path).then(a.method.cmp(&b.method)));
+        endpoints.sort_by(|a, b| a.path.cmp(&b.path).then(a.method.cmp(b.method)));
         endpoints
     }
 
@@ -431,7 +431,7 @@ impl OpenApiSpec {
 #[derive(Debug)]
 pub struct EndpointInfo {
     pub path: String,
-    pub method: String,
+    pub method: &'static str,
     pub response_schema: Option<Schema>,
 }
 

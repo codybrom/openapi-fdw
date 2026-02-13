@@ -349,7 +349,7 @@ fn test_generate_foreign_table_no_schema() {
     let spec = make_test_spec();
     let endpoint = crate::spec::EndpointInfo {
         path: "/health".to_string(),
-        method: "GET".to_string(),
+        method: "GET",
         response_schema: None,
     };
     let table = generate_foreign_table(&endpoint, &spec, "test_server", true);
@@ -416,7 +416,7 @@ fn test_generate_foreign_table_post_method() {
     let spec = make_test_spec();
     let endpoint = crate::spec::EndpointInfo {
         path: "/search".to_string(),
-        method: "POST".to_string(),
+        method: "POST",
         response_schema: None,
     };
     let table = generate_foreign_table(&endpoint, &spec, "test_server", true);
@@ -432,7 +432,7 @@ fn test_generate_foreign_table_get_no_method() {
     let spec = make_test_spec();
     let endpoint = crate::spec::EndpointInfo {
         path: "/items".to_string(),
-        method: "GET".to_string(),
+        method: "GET",
         response_schema: None,
     };
     let table = generate_foreign_table(&endpoint, &spec, "test_server", true);
@@ -571,7 +571,7 @@ fn test_rowid_selection_no_id_column() {
 
     let endpoint = crate::spec::EndpointInfo {
         path: "/things".to_string(),
-        method: "GET".to_string(),
+        method: "GET",
         response_schema: Some(schema),
     };
 
@@ -614,7 +614,7 @@ fn test_rowid_selection_all_jsonb() {
 
     let endpoint = crate::spec::EndpointInfo {
         path: "/blobs".to_string(),
-        method: "GET".to_string(),
+        method: "GET",
         response_schema: Some(schema),
     };
 
@@ -802,7 +802,7 @@ fn test_generate_foreign_table_single_quote_in_endpoint() {
 
     let endpoint = crate::spec::EndpointInfo {
         path: "/o'reilly/books".to_string(),
-        method: "GET".to_string(),
+        method: "GET",
         response_schema: None,
     };
     let table = generate_foreign_table(&endpoint, &spec, "test_server", false);
@@ -818,7 +818,7 @@ fn test_quote_identifier_with_double_quote() {
     // Table name with double quote — should be doubled in identifier quoting
     let endpoint = crate::spec::EndpointInfo {
         path: "/he\"llo".to_string(),
-        method: "GET".to_string(),
+        method: "GET",
         response_schema: None,
     };
     let table_name = endpoint.table_name();
