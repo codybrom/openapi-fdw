@@ -351,6 +351,30 @@ fn test_normalize_datetime_empty_string() {
     assert_eq!(OpenApiFdw::normalize_datetime(""), "");
 }
 
+#[test]
+fn test_normalize_datetime_tz_without_colon() {
+    // Threads API format: +0000 → +00:00
+    assert_eq!(
+        OpenApiFdw::normalize_datetime("2026-02-12T04:46:47+0000"),
+        "2026-02-12T04:46:47+00:00"
+    );
+}
+
+#[test]
+fn test_normalize_datetime_negative_tz_without_colon() {
+    assert_eq!(
+        OpenApiFdw::normalize_datetime("2024-09-12T23:17:39-0500"),
+        "2024-09-12T23:17:39-05:00"
+    );
+}
+
+#[test]
+fn test_normalize_datetime_tz_with_colon_unchanged() {
+    // Already has colon — should pass through
+    let dt = "2024-06-15T10:30:00+05:30";
+    assert_eq!(OpenApiFdw::normalize_datetime(dt), dt);
+}
+
 // --- json_to_cell_cached tests ---
 
 /// Helper: build an FDW with cached columns and column_key_map, then call json_to_cell_cached

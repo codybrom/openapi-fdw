@@ -76,19 +76,36 @@ pub(crate) fn normalize_to_alnum(s: &str) -> String {
 impl OpenApiFdw {
     /// Normalize a date/datetime string for RFC3339 parsing.
     ///
-    /// OpenAPI `format: "date"` produces `"2024-01-15"` (RFC 3339 `full-date`),
-    /// but `time::parse_from_rfc3339` requires a full datetime. This appends
-    /// `T00:00:00Z` to date-only strings so they parse correctly.
+    /// Handles two non-RFC3339 formats:
+    /// - Date-only `"2024-01-15"` → `"2024-01-15T00:00:00Z"`
+    /// - ISO 8601 tz without colon `"2024-01-15T12:00:00+0000"` → `"2024-01-15T12:00:00+00:00"`
     ///
     /// Returns `Cow<str>` to avoid allocating when the string is already valid.
     pub(crate) fn normalize_datetime(s: &str) -> Cow<'_, str> {
         // Date-only: exactly 10 chars matching YYYY-MM-DD pattern
         if s.len() == 10 && s.as_bytes().get(4) == Some(&b'-') && s.as_bytes().get(7) == Some(&b'-')
         {
-            Cow::Owned(format!("{s}T00:00:00Z"))
-        } else {
-            Cow::Borrowed(s)
+            return Cow::Owned(format!("{s}T00:00:00Z"));
         }
+
+        // Fix timezone offset without colon: +0000 → +00:00, -0500 → -05:00
+        // ISO 8601 allows ±HHMM but RFC 3339 requires ±HH:MM
+        let bytes = s.as_bytes();
+        let len = bytes.len();
+        if len >= 5 {
+            let sign_pos = len - 4;
+            if (bytes[sign_pos - 1] == b'+' || bytes[sign_pos - 1] == b'-')
+                && bytes[sign_pos..].iter().all(|b| b.is_ascii_digit())
+            {
+                let mut fixed = String::with_capacity(len + 1);
+                fixed.push_str(&s[..sign_pos + 2]);
+                fixed.push(':');
+                fixed.push_str(&s[sign_pos + 2..]);
+                return Cow::Owned(fixed);
+            }
+        }
+
+        Cow::Borrowed(s)
     }
 
     /// Build a map from column index to resolved JSON key, using the first row's keys.

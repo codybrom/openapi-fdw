@@ -2,13 +2,13 @@
 # Smoke test: runs one query against every table to verify the example works.
 # Run after setup.sh has completed.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 PASS=0
 FAIL=0
 
 psql_cmd() {
-  docker compose -f example/docker-compose.yml exec -T -e PGPASSWORD=postgres db psql -U postgres -P pager=off "$@"
+  docker compose -f examples/nws/docker-compose.yml exec -T -e PGPASSWORD=postgres db psql -U postgres -P pager=off "$@"
 }
 
 run_test() {

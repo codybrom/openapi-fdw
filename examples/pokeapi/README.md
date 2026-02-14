@@ -1,0 +1,237 @@
+# PokéAPI Example
+
+Query the [PokéAPI](https://pokeapi.co/) using SQL. This example demonstrates the OpenAPI FDW against a free, no-auth API with **offset-based pagination** and auto-detected `results` wrapper key.
+
+## Quick Start
+
+**Prerequisites:** Docker, Rust 1.88+, `cargo-component` v0.21.1, `wasm32-unknown-unknown` target.
+
+```bash
+# Start everything (builds WASM, starts Postgres, copies binary)
+./examples/pokeapi/setup.sh
+
+# Connect
+psql postgresql://postgres:postgres@localhost:54325/postgres
+
+# When done
+./examples/pokeapi/teardown.sh
+```
+
+> All queries below hit the live PokéAPI. No API key or authentication is needed.
+
+---
+
+## 1. Pokemon List
+
+Fetches the paginated list of all Pokemon (~1350 entries). Demonstrates **offset-based pagination** with auto-detected `results` wrapper key and `limit` page size parameter. The FDW automatically follows the `next` URL in each response to fetch subsequent pages.
+
+```sql
+SELECT name, url
+FROM pokemon
+LIMIT 5;
+```
+
+| name | url |
+| --- | --- |
+| bulbasaur | <https://pokeapi.co/api/v2/pokemon/1/> |
+| ivysaur | <https://pokeapi.co/api/v2/pokemon/2/> |
+| venusaur | <https://pokeapi.co/api/v2/pokemon/3/> |
+| charmander | <https://pokeapi.co/api/v2/pokemon/4/> |
+| charmeleon | <https://pokeapi.co/api/v2/pokemon/5/> |
+
+List endpoints only return `name` and `url` pairs. Use the detail table to get full data for a specific Pokemon.
+
+## 2. Pokemon Detail
+
+**Path parameter substitution**: the `{name}` placeholder in the endpoint is replaced with the value from your WHERE clause. Returns a single object with full Pokemon data.
+
+```sql
+SELECT id, name, height, weight, base_experience, is_default
+FROM pokemon_detail
+WHERE name = 'pikachu';
+```
+
+| id | name | height | weight | base_experience | is_default |
+| --- | --- | --- | --- | --- | --- |
+| 25 | pikachu | 4 | 60 | 112 | t |
+
+Complex nested data like abilities, types, and stats are returned as `jsonb`:
+
+```sql
+SELECT name, types, abilities
+FROM pokemon_detail
+WHERE name = 'charizard';
+```
+
+| name | types | abilities |
+| --- | --- | --- |
+| charizard | `[{"slot":1,"type":{"name":"fire","url":"..."}},{"slot":2,"type":{"name":"flying","url":"..."}}]` | `[{"slot":1,"ability":{"name":"blaze","url":"..."},"is_hidden":false},...]` |
+
+Extract specific fields from the jsonb columns:
+
+```sql
+SELECT name,
+       sprites->>'front_default' AS sprite_url
+FROM pokemon_detail
+WHERE name = 'eevee';
+```
+
+Try other Pokemon: `bulbasaur`, `charizard`, `mewtwo`, `snorlax`, `gengar`.
+
+## 3. Types List
+
+Fetches all Pokemon types. With only 21 types, this fits within a single page (page size is 20, so it takes two small fetches).
+
+```sql
+SELECT name, url
+FROM types;
+```
+
+| name | url |
+| --- | --- |
+| normal | <https://pokeapi.co/api/v2/type/1/> |
+| fighting | <https://pokeapi.co/api/v2/type/2/> |
+| flying | <https://pokeapi.co/api/v2/type/3/> |
+| poison | <https://pokeapi.co/api/v2/type/4/> |
+| ground | <https://pokeapi.co/api/v2/type/5/> |
+| rock | <https://pokeapi.co/api/v2/type/6/> |
+| bug | <https://pokeapi.co/api/v2/type/7/> |
+| ghost | <https://pokeapi.co/api/v2/type/8/> |
+| steel | <https://pokeapi.co/api/v2/type/9/> |
+| fire | <https://pokeapi.co/api/v2/type/10/> |
+| water | <https://pokeapi.co/api/v2/type/11/> |
+| grass | <https://pokeapi.co/api/v2/type/12/> |
+| electric | <https://pokeapi.co/api/v2/type/13/> |
+| psychic | <https://pokeapi.co/api/v2/type/14/> |
+| ice | <https://pokeapi.co/api/v2/type/15/> |
+| dragon | <https://pokeapi.co/api/v2/type/16/> |
+| dark | <https://pokeapi.co/api/v2/type/17/> |
+| fairy | <https://pokeapi.co/api/v2/type/18/> |
+| stellar | <https://pokeapi.co/api/v2/type/19/> |
+| unknown | <https://pokeapi.co/api/v2/type/10001/> |
+| shadow | <https://pokeapi.co/api/v2/type/10002/> |
+
+## 4. Type Detail
+
+Detailed information about a single type, including **damage relations** (strengths and weaknesses) and a list of all Pokemon of that type.
+
+```sql
+SELECT id, name, damage_relations
+FROM type_detail
+WHERE name = 'fire';
+```
+
+| id | name | damage_relations |
+| --- | --- | --- |
+| 10 | fire | `{"double_damage_to":[{"name":"grass","url":"..."},{"name":"ice","url":"..."},{"name":"bug","url":"..."},{"name":"steel","url":"..."}],"half_damage_from":[{"name":"fire","url":"..."},...],...}` |
+
+The `damage_relations` jsonb column contains the full type effectiveness chart. Extract specific matchups:
+
+```sql
+SELECT name,
+       damage_relations->'double_damage_to' AS super_effective_against
+FROM type_detail
+WHERE name = 'fire';
+```
+
+Try other types: `water`, `electric`, `dragon`, `fairy`, `ghost`.
+
+## 5. Berries List
+
+Fetches all berries (64 items). Demonstrates pagination across multiple pages.
+
+```sql
+SELECT name, url
+FROM berries
+LIMIT 5;
+```
+
+| name | url |
+| --- | --- |
+| cheri | <https://pokeapi.co/api/v2/berry/1/> |
+| chesto | <https://pokeapi.co/api/v2/berry/2/> |
+| pecha | <https://pokeapi.co/api/v2/berry/3/> |
+| rawst | <https://pokeapi.co/api/v2/berry/4/> |
+| aspear | <https://pokeapi.co/api/v2/berry/5/> |
+
+## 6. Berry Detail
+
+Detailed information about a single berry, including growth data, flavors, and natural gift properties.
+
+```sql
+SELECT id, name, growth_time, max_harvest, natural_gift_power,
+       size, smoothness, soil_dryness
+FROM berry_detail
+WHERE name = 'cheri';
+```
+
+| id | name | growth_time | max_harvest | natural_gift_power | size | smoothness | soil_dryness |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | cheri | 3 | 5 | 60 | 20 | 25 | 15 |
+
+Complex data like firmness, flavors, and natural gift type are returned as `jsonb`:
+
+```sql
+SELECT name,
+       firmness->>'name' AS firmness,
+       natural_gift_type->>'name' AS gift_type
+FROM berry_detail
+WHERE name = 'cheri';
+```
+
+| name | firmness | gift_type |
+| --- | --- | --- |
+| cheri | soft | fire |
+
+Try other berries: `chesto`, `pecha`, `rawst`, `aspear`, `leppa`, `oran`, `sitrus`.
+
+## 7. Debug Mode
+
+The `pokemon_debug` table uses the `pokeapi_debug` server which has `debug 'true'`. This emits HTTP request details (method, URL, status, response size) and scan statistics as PostgreSQL INFO messages.
+
+```sql
+SELECT name, url
+FROM pokemon_debug
+LIMIT 3;
+```
+
+Look for INFO output like:
+
+```log
+INFO:  [openapi_fdw] HTTP GET https://pokeapi.co/api/v2/pokemon?limit=20 -> 200 (1416 bytes)
+INFO:  [openapi_fdw] Scan complete: 3 rows, 1 columns
+```
+
+## 8. The `attrs` Column
+
+Every table includes an `attrs jsonb` column that captures **all fields not mapped to named columns**. This is useful for exploring what data the API returns without defining every column upfront.
+
+For list endpoints, `attrs` will be mostly empty since the API only returns `name` and `url`. For detail endpoints, `attrs` captures the remaining fields:
+
+```sql
+SELECT name,
+       attrs->>'location_area_encounters' AS encounters_url
+FROM pokemon_detail
+WHERE name = 'pikachu';
+```
+
+| name | encounters_url |
+| --- | --- |
+| pikachu | <https://pokeapi.co/api/v2/pokemon/25/encounters> |
+
+## Features Demonstrated
+
+| Feature | Table(s) |
+| --- | --- |
+| Offset-based pagination (auto-followed `next` URL) | `pokemon`, `types`, `berries` |
+| Auto-detected `results` wrapper key | All list tables |
+| Path parameter substitution | `pokemon_detail`, `type_detail`, `berry_detail` |
+| Single object response | `pokemon_detail`, `type_detail`, `berry_detail` |
+| Integer type coercion | `pokemon_detail`, `berry_detail` |
+| Boolean type coercion | `pokemon_detail` |
+| JSONB for complex nested data | `pokemon_detail`, `type_detail`, `berry_detail` |
+| LIMIT pushdown | Any table with `LIMIT` |
+| Debug mode (`debug`) | `pokemon_debug` |
+| `attrs` catch-all column | All tables |
+| `rowid_column` | All tables |
+| No authentication required | All servers |

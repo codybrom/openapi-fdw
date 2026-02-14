@@ -8,13 +8,13 @@ Query the [National Weather Service API](https://www.weather.gov/documentation/s
 
 ```bash
 # Start everything (builds WASM, starts Postgres, copies binary)
-./example/setup.sh
+./examples/nws/setup.sh
 
 # Connect
 psql postgresql://postgres:postgres@localhost:54322/postgres
 
 # When done
-./example/teardown.sh
+./examples/nws/teardown.sh
 ```
 
 > All queries below hit the live NWS API. Results will reflect real-time weather data.
@@ -28,8 +28,16 @@ Fetches the full list of US weather stations. Demonstrates **GeoJSON extraction*
 ```sql
 SELECT station_identifier, name, time_zone
 FROM stations
-LIMIT 10;
+LIMIT 5;
 ```
+
+| station_identifier | name | time_zone |
+| --- | --- | --- |
+| 0007W | Montford Middle | America/New_York |
+| 000PG | Southside Road | America/Los_Angeles |
+| 000SE | SCE South Hills Park | America/Los_Angeles |
+| 001AS | Poloa_Wx | Pacific/Pago_Pago |
+| 001BH | Tilford | America/Denver |
 
 The `stations` table paginates automatically — the FDW follows `/pagination/next` cursors. Try fetching more:
 
@@ -45,6 +53,12 @@ FROM stations
 LIMIT 3;
 ```
 
+| station_identifier | name | elevation |
+| --- | --- | --- |
+| 0007W | Montford Middle | `{"value": 49.0728, "unitCode": "wmoUnit:m"}` |
+| 000PG | Southside Road | `{"value": 129.2352, "unitCode": "wmoUnit:m"}` |
+| 000SE | SCE South Hills Park | `{"value": 242.9256, "unitCode": "wmoUnit:m"}` |
+
 ## 2. Active Alerts
 
 Different GeoJSON shape with **timestamptz coercion** for `onset` and `expires` columns.
@@ -54,6 +68,11 @@ SELECT event, severity, headline, onset, expires
 FROM active_alerts
 LIMIT 5;
 ```
+
+| event | severity | headline | onset | expires |
+| --- | --- | --- | --- | --- |
+| Flash Flood Warning | Severe | Flash Flood Warning issued February 13 at 10:07PM CST… | 2026-02-14 04:07:00+00 | 2026-02-14 05:30:00+00 |
+| Small Craft Advisory | Minor | Small Craft Advisory issued February 13 at 11:03PM EST… | 2026-02-15 06:00:00+00 | 2026-02-14 18:15:00+00 |
 
 Filter in SQL after fetching:
 
@@ -73,8 +92,14 @@ When a WHERE clause references a column that isn't a path parameter, the FDW sen
 SELECT event, severity, headline
 FROM active_alerts
 WHERE severity = 'Severe'
-LIMIT 5;
+LIMIT 3;
 ```
+
+| event | severity | headline |
+| --- | --- | --- |
+| Flash Flood Warning | Severe | Flash Flood Warning issued February 13 at 10:07PM CST… |
+| Severe Thunderstorm Warning | Severe | Severe Thunderstorm Warning issued February 13 at 10:02PM CST… |
+| Winter Storm Watch | Severe | Winter Storm Watch issued February 13 at 7:52PM PST… |
 
 Try other severity values: `Extreme`, `Moderate`, `Minor`, `Unknown`.
 
@@ -87,8 +112,14 @@ Try other severity values: `Extreme`, `Moderate`, `Minor`, `Unknown`.
 SELECT timestamp, text_description, temperature
 FROM station_observations
 WHERE station_id = 'KDEN'
-LIMIT 5;
+LIMIT 3;
 ```
+
+| timestamp | text_description | temperature |
+| --- | --- | --- |
+| 2026-02-14 03:45:00+00 | Cloudy | `{"value": 7, "unitCode": "wmoUnit:degC", "qualityControl": "V"}` |
+| 2026-02-14 03:40:00+00 | Cloudy | `{"value": 7, "unitCode": "wmoUnit:degC", "qualityControl": "V"}` |
+| 2026-02-14 03:35:00+00 | Cloudy | `{"value": 8, "unitCode": "wmoUnit:degC", "qualityControl": "V"}` |
 
 `KDEN` is Denver International Airport. Try other station IDs: `KJFK` (New York), `KLAX` (Los Angeles), `KORD` (Chicago).
 
@@ -101,8 +132,14 @@ SELECT timestamp,
        text_description
 FROM station_observations
 WHERE station_id = 'KDEN'
-LIMIT 5;
+LIMIT 3;
 ```
+
+| timestamp | temp_c | wind_mps | text_description |
+| --- | --- | --- | --- |
+| 2026-02-14 03:45:00+00 | 7 | 24.084 | Cloudy |
+| 2026-02-14 03:40:00+00 | 7 | 25.92 | Cloudy |
+| 2026-02-14 03:35:00+00 | 8 | 25.92 | Cloudy |
 
 ## 5. Current Conditions
 
@@ -119,6 +156,10 @@ FROM latest_observation
 WHERE station_id = 'KDEN';
 ```
 
+| text_description | temp_c | wind_mps | wind_deg | pressure_pa | humidity_pct |
+| --- | --- | --- | --- | --- | --- |
+| Cloudy | 7 | 24.084 | 310 | | 65.63 |
+
 ## 6. Point Metadata & Forecast
 
 This two-step flow demonstrates **composite path parameters** and **nested response extraction**.
@@ -131,6 +172,10 @@ FROM point_metadata
 WHERE point = '39.7456,-104.9887';
 ```
 
+| grid_id | grid_x | grid_y | forecast |
+| --- | --- | --- | --- |
+| BOU | 63 | 62 | <https://api.weather.gov/gridpoints/BOU/63,62/forecast> |
+
 **Step 2:** Use those grid coordinates to fetch the forecast. This exercises **multiple path parameters** (`wfo`, `x`, `y`) and **nested `response_path`** (`/properties/periods` digs two levels into the response):
 
 ```sql
@@ -140,6 +185,13 @@ SELECT name, temperature, temperature_unit,
 FROM forecast_periods
 WHERE wfo = 'BOU' AND x = '63' AND y = '62';
 ```
+
+| name | temperature | temperature_unit | is_daytime | wind_speed | short_forecast |
+| --- | --- | --- | --- | --- | --- |
+| Tonight | 35 | F | false | 3 to 7 mph | Rain Showers Likely |
+| Saturday | 57 | F | true | 6 mph | Sunny |
+| Saturday Night | 31 | F | false | 5 mph | Mostly Clear |
+| Sunday | 66 | F | true | 6 mph | Mostly Sunny |
 
 > Grid coordinates vary by location. Always use Step 1 to find the right values for your area.
 
@@ -180,7 +232,7 @@ LIMIT 5;
 
 Look for INFO output like:
 
-```
+```log
 INFO:  [openapi_fdw] HTTP GET https://api.weather.gov/stations?limit=50 -> 200 (51639 bytes)
 INFO:  [openapi_fdw] Scan complete: 5 rows, 2 columns
 ```
@@ -190,23 +242,23 @@ INFO:  [openapi_fdw] Scan complete: 5 rows, 2 columns
 Every table includes an `attrs jsonb` column that captures **all fields not mapped to named columns**. This is useful for exploring what data the API returns without defining every column.
 
 ```sql
-SELECT station_identifier, jsonb_object_keys(attrs) AS extra_field
-FROM stations
-LIMIT 20;
-```
-
-Dig into a specific field that isn't in the table definition:
-
-```sql
 SELECT station_identifier, attrs->>'county' AS county
 FROM stations
-LIMIT 10;
+LIMIT 5;
 ```
+
+| station_identifier | county |
+| --- | --- |
+| 0007W | <https://api.weather.gov/zones/county/FLC073> |
+| 000PG | <https://api.weather.gov/zones/county/CAC069> |
+| 000SE | <https://api.weather.gov/zones/county/CAC037> |
+| 001AS | <https://api.weather.gov/zones/county/ASC050> |
+| 001BH | <https://api.weather.gov/zones/county/SDC093> |
 
 ## Features Demonstrated
 
 | Feature | Table(s) |
-|---------|----------|
+| --- | --- |
 | GeoJSON extraction (`response_path` + `object_path`) | `stations`, `active_alerts`, `station_observations` |
 | Cursor-based pagination (`cursor_path`) | `stations` |
 | Path parameter substitution | `station_observations`, `latest_observation`, `point_metadata`, `forecast_periods` |
