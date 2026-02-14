@@ -17,7 +17,7 @@ Each example is a self-contained Docker setup that connects to a real API. Run `
 | Example | API | Port | Auth | Features |
 | --- | --- | --- | --- | --- |
 | [github](github/) | [GitHub REST API](https://docs.github.com/en/rest) | 54324 | Bearer token | Path params, custom headers, `items` wrapper, search pushdown |
-| [threads](threads/) | [Meta Threads API](https://developers.facebook.com/docs/threads) | 54323 | Bearer token | Cursor-based pagination, path params, query pushdown |
+| [threads](threads/) | [Meta Threads API](https://developers.facebook.com/docs/threads) | 54323 | OAuth token (query param) | Cursor-based pagination, path params, query pushdown |
 
 ## Usage
 
