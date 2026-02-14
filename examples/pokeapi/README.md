@@ -7,23 +7,54 @@ Query the [PokéAPI](https://pokeapi.co/) using SQL. This example demonstrates t
 **Prerequisites:** Docker, Rust 1.88+, `cargo-component` v0.21.1, `wasm32-unknown-unknown` target.
 
 ```bash
-# Start everything (builds WASM, starts Postgres, copies binary)
-./examples/pokeapi/setup.sh
+# Run tests and auto-cleanup
+./examples/run.sh pokeapi
 
-# Connect
-psql postgresql://postgres:postgres@localhost:54325/postgres
+# Or keep the container running to explore interactively
+./examples/run.sh pokeapi --no-cleanup
+psql postgresql://postgres:postgres@localhost:54322/postgres
 
-# When done
-./examples/pokeapi/teardown.sh
+# Tear down manually when done
+docker compose -f examples/docker-compose.yml down -v
 ```
 
 > All queries below hit the live PokéAPI. No API key or authentication is needed.
 
 ---
 
+## Server Configuration
+
+```sql
+create server pokeapi
+  foreign data wrapper wasm_wrapper
+  options (
+    fdw_package_url 'file:///openapi_fdw.wasm',
+    fdw_package_name 'supabase:openapi-fdw',
+    fdw_package_version '0.2.0',
+    base_url 'https://pokeapi.co/api/v2',
+    page_size '20',
+    page_size_param 'limit'
+  );
+```
+
+---
+
 ## 1. Pokemon List
 
 Fetches the paginated list of all Pokemon (~1350 entries). Demonstrates **offset-based pagination** with auto-detected `results` wrapper key and `limit` page size parameter. The FDW automatically follows the `next` URL in each response to fetch subsequent pages.
+
+```sql
+create foreign table pokemon (
+  name text,
+  url text,
+  attrs jsonb
+)
+  server pokeapi
+  options (
+    endpoint '/pokemon',
+    rowid_column 'name'
+  );
+```
 
 ```sql
 SELECT name, url
@@ -44,6 +75,29 @@ List endpoints only return `name` and `url` pairs. Use the detail table to get f
 ## 2. Pokemon Detail
 
 **Path parameter substitution**: the `{name}` placeholder in the endpoint is replaced with the value from your WHERE clause. Returns a single object with full Pokemon data.
+
+```sql
+create foreign table pokemon_detail (
+  id integer,
+  name text,
+  height integer,
+  weight integer,
+  base_experience integer,
+  is_default boolean,
+  order_num integer,
+  abilities jsonb,
+  types jsonb,
+  stats jsonb,
+  moves jsonb,
+  sprites jsonb,
+  attrs jsonb
+)
+  server pokeapi
+  options (
+    endpoint '/pokemon/{name}',
+    rowid_column 'id'
+  );
+```
 
 ```sql
 SELECT id, name, height, weight, base_experience, is_default
@@ -76,11 +130,51 @@ FROM pokemon_detail
 WHERE name = 'eevee';
 ```
 
+Extract base stats from the jsonb column:
+
+```sql
+SELECT name, height, weight,
+       stats->0->>'base_stat' AS hp,
+       stats->1->>'base_stat' AS attack,
+       stats->2->>'base_stat' AS defense,
+       stats->3->>'base_stat' AS sp_attack,
+       stats->4->>'base_stat' AS sp_defense,
+       stats->5->>'base_stat' AS speed
+FROM pokemon_detail
+WHERE name = 'pikachu';
+```
+
+| name | height | weight | hp | attack | defense | sp_attack | sp_defense | speed |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| pikachu | 4 | 60 | 35 | 55 | 40 | 50 | 50 | 90 |
+
+Compare two Pokemon side by side:
+
+```sql
+SELECT name, height, weight, base_experience, is_default,
+       types, abilities
+FROM pokemon_detail
+WHERE name IN ('charizard', 'blastoise');
+```
+
 Try other Pokemon: `bulbasaur`, `charizard`, `mewtwo`, `snorlax`, `gengar`.
 
 ## 3. Types List
 
 Fetches all Pokemon types. With only 21 types, this fits within a single page (page size is 20, so it takes two small fetches).
+
+```sql
+create foreign table types (
+  name text,
+  url text,
+  attrs jsonb
+)
+  server pokeapi
+  options (
+    endpoint '/type',
+    rowid_column 'name'
+  );
+```
 
 ```sql
 SELECT name, url
@@ -116,6 +210,22 @@ FROM types;
 Detailed information about a single type, including **damage relations** (strengths and weaknesses) and a list of all Pokemon of that type.
 
 ```sql
+create foreign table type_detail (
+  id integer,
+  name text,
+  damage_relations jsonb,
+  pokemon jsonb,
+  moves jsonb,
+  attrs jsonb
+)
+  server pokeapi
+  options (
+    endpoint '/type/{name}',
+    rowid_column 'id'
+  );
+```
+
+```sql
 SELECT id, name, damage_relations
 FROM type_detail
 WHERE name = 'fire';
@@ -134,11 +244,36 @@ FROM type_detail
 WHERE name = 'fire';
 ```
 
+Get the list of all Pokemon for a given type:
+
+```sql
+SELECT name,
+       damage_relations->'double_damage_to' AS super_effective,
+       damage_relations->'half_damage_from' AS resists,
+       pokemon,
+       moves
+FROM type_detail
+WHERE name = 'dragon';
+```
+
 Try other types: `water`, `electric`, `dragon`, `fairy`, `ghost`.
 
 ## 5. Berries List
 
 Fetches all berries (64 items). Demonstrates pagination across multiple pages.
+
+```sql
+create foreign table berries (
+  name text,
+  url text,
+  attrs jsonb
+)
+  server pokeapi
+  options (
+    endpoint '/berry',
+    rowid_column 'name'
+  );
+```
 
 ```sql
 SELECT name, url
@@ -157,6 +292,28 @@ LIMIT 5;
 ## 6. Berry Detail
 
 Detailed information about a single berry, including growth data, flavors, and natural gift properties.
+
+```sql
+create foreign table berry_detail (
+  id integer,
+  name text,
+  growth_time integer,
+  max_harvest integer,
+  natural_gift_power integer,
+  size integer,
+  smoothness integer,
+  soil_dryness integer,
+  firmness jsonb,
+  flavors jsonb,
+  natural_gift_type jsonb,
+  attrs jsonb
+)
+  server pokeapi
+  options (
+    endpoint '/berry/{name}',
+    rowid_column 'id'
+  );
+```
 
 ```sql
 SELECT id, name, growth_time, max_harvest, natural_gift_power,
@@ -182,6 +339,18 @@ WHERE name = 'cheri';
 | name | firmness | gift_type |
 | --- | --- | --- |
 | cheri | soft | fire |
+
+Extract all flavor profiles from the jsonb column:
+
+```sql
+SELECT name, growth_time, max_harvest,
+       firmness->>'name' AS firmness,
+       natural_gift_type->>'name' AS gift_type,
+       natural_gift_power,
+       flavors
+FROM berry_detail
+WHERE name = 'sitrus';
+```
 
 Try other berries: `chesto`, `pecha`, `rawst`, `aspear`, `leppa`, `oran`, `sitrus`.
 

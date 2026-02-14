@@ -7,27 +7,73 @@ Query the [GitHub REST API](https://docs.github.com/en/rest) using SQL. This exa
 **Prerequisites:** Docker, Rust 1.88+, `cargo-component` v0.21.1, `wasm32-unknown-unknown` target, and a [GitHub personal access token](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens).
 
 ```bash
-# Create .env with your GitHub token
-cp examples/github/.env.example examples/github/.env
-# edit .env with your token
+# Create .env with your tokens (one file for all authenticated examples)
+cp examples/.env.example examples/.env
+# edit .env with your GitHub token
 
-# Start everything (builds WASM, starts Postgres, configures auth)
-./examples/github/setup.sh
+# Run tests and auto-cleanup
+./examples/run.sh github
 
-# Connect
-psql postgresql://postgres:postgres@localhost:54324/postgres
+# Or keep the container running to explore interactively
+./examples/run.sh github --no-cleanup
+psql postgresql://postgres:postgres@localhost:54322/postgres
 
-# When done
-./examples/github/teardown.sh
+# Tear down manually when done
+docker compose -f examples/docker-compose.yml down -v
 ```
 
 > All queries below hit the live GitHub API. Results will reflect real data.
 
 ---
 
+## Server Configuration
+
+```sql
+create server github
+  foreign data wrapper wasm_wrapper
+  options (
+    fdw_package_url 'file:///openapi_fdw.wasm',
+    fdw_package_name 'supabase:openapi-fdw',
+    fdw_package_version '0.2.0',
+    base_url 'https://api.github.com',
+    api_key '<YOUR_GITHUB_TOKEN>',
+    user_agent 'openapi-fdw-example/0.2.0',
+    accept 'application/vnd.github+json',
+    headers '{"X-GitHub-Api-Version": "2022-11-28"}',
+    page_size '30',
+    page_size_param 'per_page'
+  );
+```
+
+---
+
 ## 1. Your Profile
 
 Single object response. The FDW returns one row with your GitHub profile info.
+
+```sql
+create foreign table my_profile (
+  login text,
+  id bigint,
+  name text,
+  email text,
+  bio text,
+  public_repos integer,
+  public_gists integer,
+  followers integer,
+  following integer,
+  created_at timestamptz,
+  avatar_url text,
+  company text,
+  location text,
+  blog text,
+  attrs jsonb
+)
+  server github
+  options (
+    endpoint '/user'
+  );
+```
 
 ```sql
 SELECT login, name, public_repos, followers
@@ -40,9 +86,47 @@ FROM my_profile;
 
 > Your results will reflect your own GitHub profile.
 
+Full profile with bio, company, and timestamps:
+
+```sql
+SELECT login, name, email, bio, company, location, blog,
+       public_repos, public_gists, followers, following,
+       created_at
+FROM my_profile;
+```
+
 ## 2. Your Repositories
 
 Paginated list of your repos. The FDW auto-detects page-based pagination via `Link` headers.
+
+```sql
+create foreign table my_repos (
+  id bigint,
+  name text,
+  full_name text,
+  description text,
+  private boolean,
+  fork boolean,
+  language text,
+  stargazers_count integer,
+  forks_count integer,
+  open_issues_count integer,
+  created_at timestamptz,
+  updated_at timestamptz,
+  pushed_at timestamptz,
+  html_url text,
+  default_branch text,
+  archived boolean,
+  type text,
+  sort text,
+  attrs jsonb
+)
+  server github
+  options (
+    endpoint '/user/repos',
+    rowid_column 'id'
+  );
+```
 
 ```sql
 SELECT name, language, stargazers_count, fork
@@ -70,9 +154,47 @@ WHERE type = 'owner' AND sort = 'updated'
 LIMIT 5;
 ```
 
+Full repo details with descriptions, URLs, and activity timestamps:
+
+```sql
+SELECT name, description, language, private, archived,
+       stargazers_count, forks_count, open_issues_count,
+       default_branch, html_url,
+       created_at, updated_at, pushed_at
+FROM my_repos
+LIMIT 5;
+```
+
 ## 3. Repository Detail (Path Parameters)
 
 Look up a specific repository. The `{owner}` and `{repo}` placeholders in the endpoint are replaced with values from your WHERE clause.
+
+```sql
+create foreign table repo_detail (
+  id bigint,
+  name text,
+  full_name text,
+  description text,
+  private boolean,
+  stargazers_count integer,
+  forks_count integer,
+  open_issues_count integer,
+  watchers_count integer,
+  language text,
+  default_branch text,
+  created_at timestamptz,
+  updated_at timestamptz,
+  license jsonb,
+  topics jsonb,
+  owner text,
+  repo text,
+  attrs jsonb
+)
+  server github
+  options (
+    endpoint '/repos/{owner}/{repo}'
+  );
+```
 
 ```sql
 SELECT name, stargazers_count, forks_count, language
@@ -84,9 +206,46 @@ WHERE owner = 'supabase' AND repo = 'wrappers';
 | --- | --- | --- | --- |
 | wrappers | 811 | 92 | Rust |
 
+Full detail with license, topics, and watcher count:
+
+```sql
+SELECT name, description, language, default_branch,
+       stargazers_count, forks_count, watchers_count, open_issues_count,
+       license->>'name' AS license,
+       topics,
+       created_at, updated_at
+FROM repo_detail
+WHERE owner = 'supabase' AND repo = 'wrappers';
+```
+
 ## 4. Repository Issues
 
 Issues for a repository. Two path parameters plus query pushdown for state filtering:
+
+```sql
+create foreign table repo_issues (
+  id bigint,
+  number integer,
+  title text,
+  state text,
+  body text,
+  created_at timestamptz,
+  updated_at timestamptz,
+  closed_at timestamptz,
+  comments integer,
+  user_col jsonb,
+  labels jsonb,
+  html_url text,
+  owner text,
+  repo text,
+  attrs jsonb
+)
+  server github
+  options (
+    endpoint '/repos/{owner}/{repo}/issues',
+    rowid_column 'id'
+  );
+```
 
 ```sql
 SELECT number, title, state
@@ -112,9 +271,48 @@ WHERE owner = 'supabase' AND repo = 'wrappers' AND state = 'closed'
 LIMIT 5;
 ```
 
+Full issue details with body, timestamps, labels, and comment count:
+
+```sql
+SELECT number, title, state, comments,
+       body,
+       user_col->>'login' AS author,
+       labels,
+       html_url,
+       created_at, updated_at, closed_at
+FROM repo_issues
+WHERE owner = 'supabase' AND repo = 'wrappers'
+LIMIT 3;
+```
+
 ## 5. Pull Requests
 
 Pull requests with state filtering via query pushdown:
+
+```sql
+create foreign table repo_pulls (
+  id bigint,
+  number integer,
+  title text,
+  state text,
+  draft boolean,
+  created_at timestamptz,
+  updated_at timestamptz,
+  merged_at timestamptz,
+  user_col jsonb,
+  head jsonb,
+  base jsonb,
+  html_url text,
+  owner text,
+  repo text,
+  attrs jsonb
+)
+  server github
+  options (
+    endpoint '/repos/{owner}/{repo}/pulls',
+    rowid_column 'id'
+  );
+```
 
 ```sql
 SELECT number, title, state
@@ -131,9 +329,57 @@ LIMIT 5;
 | 568 | chore(deps): bump bytes from 1.10.1 to 1.11.1 in the cargo group across 1 directory | closed |
 | 567 | chore(deps): bump wasmtime from 36.0.3 to 36.0.5 in the cargo group across 1 directory | closed |
 
+PR details with draft status, branch info, and merge timestamp:
+
+```sql
+SELECT number, title, state, draft,
+       user_col->>'login' AS author,
+       head->>'ref' AS source_branch,
+       base->>'ref' AS target_branch,
+       html_url,
+       created_at, merged_at
+FROM repo_pulls
+WHERE owner = 'supabase' AND repo = 'wrappers' AND state = 'closed'
+LIMIT 5;
+```
+
+Open PRs only:
+
+```sql
+SELECT number, title, draft,
+       user_col->>'login' AS author,
+       created_at
+FROM repo_pulls
+WHERE owner = 'supabase' AND repo = 'wrappers' AND state = 'open'
+LIMIT 5;
+```
+
 ## 6. Releases
 
 Paginated list of releases for a repository:
+
+```sql
+create foreign table repo_releases (
+  id bigint,
+  tag_name text,
+  name text,
+  body text,
+  draft boolean,
+  prerelease boolean,
+  created_at timestamptz,
+  published_at timestamptz,
+  author jsonb,
+  html_url text,
+  owner text,
+  repo text,
+  attrs jsonb
+)
+  server github
+  options (
+    endpoint '/repos/{owner}/{repo}/releases',
+    rowid_column 'id'
+  );
+```
 
 ```sql
 SELECT tag_name, name, prerelease
@@ -150,9 +396,46 @@ LIMIT 5;
 | wasm_clerk_fdw_v0.2.1 | wasm_clerk_fdw_v0.2.1 | f |
 | v0.5.7 | v0.5.7 | f |
 
+Full release info with author, publish date, and release notes:
+
+```sql
+SELECT tag_name, name, draft, prerelease,
+       author->>'login' AS author,
+       published_at,
+       left(body, 200) AS release_notes,
+       html_url
+FROM repo_releases
+WHERE owner = 'supabase' AND repo = 'wrappers'
+LIMIT 3;
+```
+
 ## 7. Search Repositories (Query Pushdown)
 
 When a WHERE clause references `q`, the FDW sends it as a query parameter to the `/search/repositories` endpoint. The FDW auto-detects the `items` wrapper key in the response.
+
+```sql
+create foreign table search_repos (
+  id bigint,
+  name text,
+  full_name text,
+  description text,
+  stargazers_count integer,
+  forks_count integer,
+  language text,
+  open_issues_count integer,
+  created_at timestamptz,
+  html_url text,
+  topics jsonb,
+  license jsonb,
+  q text,
+  attrs jsonb
+)
+  server github
+  options (
+    endpoint '/search/repositories',
+    rowid_column 'id'
+  );
+```
 
 ```sql
 -- Pushes down to: GET /search/repositories?q=openapi+foreign+data+wrapper
@@ -167,6 +450,19 @@ LIMIT 5;
 | openapi_fdw | sabino/openapi_fdw | 2 |
 | openapi-fdw | user/openapi-fdw | 1 |
 | fdw-api | user/fdw-api | 0 |
+
+Search with full detail — description, license, topics, and timestamps:
+
+```sql
+SELECT name, full_name, description, language,
+       stargazers_count, forks_count, open_issues_count,
+       license->>'name' AS license,
+       topics,
+       html_url, created_at
+FROM search_repos
+WHERE q = 'postgres foreign data wrapper rust'
+LIMIT 5;
+```
 
 ## 8. Debug Mode
 

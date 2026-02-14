@@ -7,23 +7,61 @@ Query the [National Weather Service API](https://www.weather.gov/documentation/s
 **Prerequisites:** Docker, Rust 1.88+, `cargo-component` v0.21.1, `wasm32-unknown-unknown` target.
 
 ```bash
-# Start everything (builds WASM, starts Postgres, copies binary)
-./examples/nws/setup.sh
+# Run tests and auto-cleanup
+./examples/run.sh nws
 
-# Connect
+# Or keep the container running to explore interactively
+./examples/run.sh nws --no-cleanup
 psql postgresql://postgres:postgres@localhost:54322/postgres
 
-# When done
-./examples/nws/teardown.sh
+# Tear down manually when done
+docker compose -f examples/docker-compose.yml down -v
 ```
 
 > All queries below hit the live NWS API. Results will reflect real-time weather data.
 
 ---
 
+## Server Configuration
+
+```sql
+create server nws
+  foreign data wrapper wasm_wrapper
+  options (
+    fdw_package_url 'file:///openapi_fdw.wasm',
+    fdw_package_name 'supabase:openapi-fdw',
+    fdw_package_version '0.2.0',
+    base_url 'https://api.weather.gov',
+    user_agent 'openapi-fdw-example/0.2.0',
+    accept 'application/geo+json'
+  );
+```
+
+---
+
 ## 1. Weather Stations
 
 Fetches the full list of US weather stations. Demonstrates **GeoJSON extraction** (`response_path` + `object_path`), **cursor-based pagination** (`cursor_path`), and **camelCase-to-snake_case** column matching (`stationIdentifier` → `station_identifier`).
+
+```sql
+create foreign table stations (
+  station_identifier text,
+  name text,
+  time_zone text,
+  elevation jsonb,
+  attrs jsonb
+)
+  server nws
+  options (
+    endpoint '/stations',
+    response_path '/features',
+    object_path '/properties',
+    rowid_column 'station_identifier',
+    cursor_path '/pagination/next',
+    page_size '50',
+    page_size_param 'limit'
+  );
+```
 
 ```sql
 SELECT station_identifier, name, time_zone
@@ -64,6 +102,27 @@ LIMIT 3;
 Different GeoJSON shape with **timestamptz coercion** for `onset` and `expires` columns.
 
 ```sql
+create foreign table active_alerts (
+  id text,
+  area_desc text,
+  severity text,
+  certainty text,
+  event text,
+  headline text,
+  onset timestamptz,
+  expires timestamptz,
+  attrs jsonb
+)
+  server nws
+  options (
+    endpoint '/alerts/active',
+    response_path '/features',
+    object_path '/properties',
+    rowid_column 'id'
+  );
+```
+
+```sql
 SELECT event, severity, headline, onset, expires
 FROM active_alerts
 LIMIT 5;
@@ -73,6 +132,15 @@ LIMIT 5;
 | --- | --- | --- | --- | --- |
 | Flash Flood Warning | Severe | Flash Flood Warning issued February 13 at 10:07PM CST… | 2026-02-14 04:07:00+00 | 2026-02-14 05:30:00+00 |
 | Small Craft Advisory | Minor | Small Craft Advisory issued February 13 at 11:03PM EST… | 2026-02-15 06:00:00+00 | 2026-02-14 18:15:00+00 |
+
+Full alert details with area, certainty, and timing:
+
+```sql
+SELECT id, event, severity, certainty, area_desc,
+       headline, onset, expires
+FROM active_alerts
+LIMIT 5;
+```
 
 Filter in SQL after fetching:
 
@@ -106,6 +174,24 @@ Try other severity values: `Extreme`, `Moderate`, `Minor`, `Unknown`.
 ## 4. Station Observations
 
 **Path parameter substitution**: the `{station_id}` placeholder in the endpoint is replaced with the value from your WHERE clause.
+
+```sql
+create foreign table station_observations (
+  timestamp timestamptz,
+  text_description text,
+  temperature jsonb,
+  wind_speed jsonb,
+  wind_direction jsonb,
+  station_id text,
+  attrs jsonb
+)
+  server nws
+  options (
+    endpoint '/stations/{station_id}/observations',
+    response_path '/features',
+    object_path '/properties'
+  );
+```
 
 ```sql
 -- Pushes down to: GET /stations/KDEN/observations
@@ -146,6 +232,24 @@ LIMIT 3;
 **Single object response** — the `/observations/latest` endpoint returns one GeoJSON Feature (not a FeatureCollection). The FDW auto-detects this and returns a single row.
 
 ```sql
+create foreign table latest_observation (
+  text_description text,
+  temperature jsonb,
+  wind_speed jsonb,
+  wind_direction jsonb,
+  barometric_pressure jsonb,
+  relative_humidity jsonb,
+  station_id text,
+  attrs jsonb
+)
+  server nws
+  options (
+    endpoint '/stations/{station_id}/observations/latest',
+    object_path '/properties'
+  );
+```
+
+```sql
 SELECT text_description,
        temperature->>'value' AS temp_c,
        wind_speed->>'value' AS wind_mps,
@@ -164,6 +268,24 @@ WHERE station_id = 'KDEN';
 
 This two-step flow demonstrates **composite path parameters** and **nested response extraction**.
 
+```sql
+create foreign table point_metadata (
+  grid_id text,
+  grid_x integer,
+  grid_y integer,
+  forecast text,
+  forecast_hourly text,
+  relative_location jsonb,
+  point text,
+  attrs jsonb
+)
+  server nws
+  options (
+    endpoint '/points/{point}',
+    object_path '/properties'
+  );
+```
+
 **Step 1:** Look up grid coordinates for a location (Denver: 39.7456,-104.9887):
 
 ```sql
@@ -176,7 +298,43 @@ WHERE point = '39.7456,-104.9887';
 | --- | --- | --- | --- |
 | BOU | 63 | 62 | <https://api.weather.gov/gridpoints/BOU/63,62/forecast> |
 
+The point metadata includes more detail than just the grid coordinates:
+
+```sql
+SELECT grid_id, grid_x, grid_y,
+       forecast, forecast_hourly,
+       relative_location->>'city' AS city,
+       relative_location->>'state' AS state
+FROM point_metadata
+WHERE point = '39.7456,-104.9887';
+```
+
 **Step 2:** Use those grid coordinates to fetch the forecast. This exercises **multiple path parameters** (`wfo`, `x`, `y`) and **nested `response_path`** (`/properties/periods` digs two levels into the response):
+
+```sql
+create foreign table forecast_periods (
+  number integer,
+  name text,
+  start_time timestamptz,
+  end_time timestamptz,
+  is_daytime boolean,
+  temperature integer,
+  temperature_unit text,
+  wind_speed text,
+  wind_direction text,
+  short_forecast text,
+  detailed_forecast text,
+  wfo text,
+  x text,
+  y text,
+  attrs jsonb
+)
+  server nws
+  options (
+    endpoint '/gridpoints/{wfo}/{x},{y}/forecast',
+    response_path '/properties/periods'
+  );
+```
 
 ```sql
 -- Replace wfo/x/y with values from Step 1
@@ -192,6 +350,17 @@ WHERE wfo = 'BOU' AND x = '63' AND y = '62';
 | Saturday | 57 | F | true | 6 mph | Sunny |
 | Saturday Night | 31 | F | false | 5 mph | Mostly Clear |
 | Sunday | 66 | F | true | 6 mph | Mostly Sunny |
+
+Full forecast with timing, wind, and detailed text:
+
+```sql
+SELECT number, name, start_time, end_time,
+       is_daytime, temperature, temperature_unit,
+       wind_speed, wind_direction,
+       short_forecast, detailed_forecast
+FROM forecast_periods
+WHERE wfo = 'BOU' AND x = '63' AND y = '62';
+```
 
 > Grid coordinates vary by location. Always use Step 1 to find the right values for your area.
 
