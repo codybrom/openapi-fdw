@@ -247,11 +247,15 @@ impl OpenApiFdw {
             ));
         }
 
-        // Add page size if configured
+        // Add page size if configured, reduced by LIMIT when available
         if self.config.page_size > 0 && !self.config.page_size_param.is_empty() {
+            let effective_size = match self.src_limit {
+                Some(limit) if limit > 0 => self.config.page_size.min(limit as usize),
+                _ => self.config.page_size,
+            };
             params.push(format!(
                 "{}={}",
-                self.config.page_size_param, self.config.page_size
+                self.config.page_size_param, effective_size
             ));
         }
 

@@ -326,3 +326,50 @@ fn test_retry_backoff_cap() {
     let delay = backoff.min(max_delay);
     assert_eq!(delay, 30_000);
 }
+
+// --- build_query_params: LIMIT-to-page_size optimization ---
+
+fn make_fdw_for_page_size(page_size: usize, src_limit: Option<i64>) -> OpenApiFdw {
+    OpenApiFdw {
+        config: ServerConfig {
+            page_size,
+            page_size_param: "per_page".to_string(),
+            ..Default::default()
+        },
+        src_limit,
+        ..Default::default()
+    }
+}
+
+fn get_page_size_param(fdw: &OpenApiFdw) -> Option<String> {
+    let (params, _) = fdw.build_query_params(&[], &[]);
+    params.iter().find(|p| p.starts_with("per_page=")).cloned()
+}
+
+#[test]
+fn test_page_size_reduced_by_limit() {
+    // LIMIT 5 with page_size=30 → per_page=5
+    let fdw = make_fdw_for_page_size(30, Some(5));
+    assert_eq!(get_page_size_param(&fdw), Some("per_page=5".to_string()));
+}
+
+#[test]
+fn test_page_size_not_increased_by_limit() {
+    // LIMIT 50 with page_size=30 → per_page=30 (limit larger than page_size)
+    let fdw = make_fdw_for_page_size(30, Some(50));
+    assert_eq!(get_page_size_param(&fdw), Some("per_page=30".to_string()));
+}
+
+#[test]
+fn test_page_size_unchanged_without_limit() {
+    // No LIMIT → per_page=30
+    let fdw = make_fdw_for_page_size(30, None);
+    assert_eq!(get_page_size_param(&fdw), Some("per_page=30".to_string()));
+}
+
+#[test]
+fn test_page_size_zero_no_param() {
+    // page_size=0 → no per_page param regardless of LIMIT
+    let fdw = make_fdw_for_page_size(0, Some(5));
+    assert_eq!(get_page_size_param(&fdw), None);
+}
