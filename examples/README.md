@@ -1,8 +1,6 @@
 # Examples
 
-Each example is a self-contained Docker setup that connects to a real API. Use `run.sh` to build, start, verify, and clean up.
-
-**Prerequisites:** Docker, Rust 1.88+, `cargo-component` v0.21.1, `wasm32-unknown-unknown` target.
+Each example shows how to configure the FDW against a real API, with complete server options, table definitions, and sample queries.
 
 ## No Auth Required
 
@@ -18,26 +16,3 @@ Each example is a self-contained Docker setup that connects to a real API. Use `
 | --- | --- | --- | --- |
 | [github](github/) | [GitHub REST API](https://docs.github.com/en/rest) | Bearer token | Path params, custom headers, `items` wrapper, search pushdown |
 | [threads](threads/) | [Meta Threads API](https://developers.facebook.com/docs/threads) | OAuth token (query param) | Cursor-based pagination, path params, query pushdown |
-
-## Usage
-
-```bash
-# Run a single example (builds, starts Postgres, verifies, cleans up)
-./examples/run.sh pokeapi
-
-# Run all examples
-./examples/run.sh
-
-# Keep containers running to explore interactively
-./examples/run.sh nws --no-cleanup
-psql postgresql://postgres:postgres@localhost:54322/postgres
-docker compose -f examples/docker-compose.yml down -v
-```
-
-For auth-required examples, copy `.env.example` to `.env` and add your tokens:
-
-```bash
-cp examples/.env.example examples/.env
-# edit examples/.env with your tokens
-./examples/run.sh github
-```

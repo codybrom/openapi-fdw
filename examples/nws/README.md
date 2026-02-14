@@ -2,26 +2,6 @@
 
 Query the [National Weather Service API](https://www.weather.gov/documentation/services-web-api) using SQL. This example exercises all major features of the OpenAPI FDW against a real, free, no-auth API.
 
-## Quick Start
-
-**Prerequisites:** Docker, Rust 1.88+, `cargo-component` v0.21.1, `wasm32-unknown-unknown` target.
-
-```bash
-# Run tests and auto-cleanup
-./examples/run.sh nws
-
-# Or keep the container running to explore interactively
-./examples/run.sh nws --no-cleanup
-psql postgresql://postgres:postgres@localhost:54322/postgres
-
-# Tear down manually when done
-docker compose -f examples/docker-compose.yml down -v
-```
-
-> All queries below hit the live NWS API. Results will reflect real-time weather data.
-
----
-
 ## Server Configuration
 
 ```sql

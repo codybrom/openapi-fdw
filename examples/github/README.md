@@ -2,30 +2,6 @@
 
 Query the [GitHub REST API](https://docs.github.com/en/rest) using SQL. This example demonstrates bearer token authentication, page-based pagination, path parameter substitution, query parameter pushdown, and custom HTTP headers.
 
-## Quick Start
-
-**Prerequisites:** Docker, Rust 1.88+, `cargo-component` v0.21.1, `wasm32-unknown-unknown` target, and a [GitHub personal access token](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens).
-
-```bash
-# Create .env with your tokens (one file for all authenticated examples)
-cp examples/.env.example examples/.env
-# edit .env with your GitHub token
-
-# Run tests and auto-cleanup
-./examples/run.sh github
-
-# Or keep the container running to explore interactively
-./examples/run.sh github --no-cleanup
-psql postgresql://postgres:postgres@localhost:54322/postgres
-
-# Tear down manually when done
-docker compose -f examples/docker-compose.yml down -v
-```
-
-> All queries below hit the live GitHub API. Results will reflect real data.
-
----
-
 ## Server Configuration
 
 ```sql

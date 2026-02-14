@@ -2,26 +2,6 @@
 
 Query the [CarAPI](https://carapi.app/) vehicle database using SQL. This example demonstrates the OpenAPI FDW against a free, no-auth API with **page-based pagination**, auto-detected `data` wrapper key, and **query parameter pushdown** for filtering by year, make, and model.
 
-## Quick Start
-
-**Prerequisites:** Docker, Rust 1.88+, `cargo-component` v0.21.1, `wasm32-unknown-unknown` target.
-
-```bash
-# Run tests and auto-cleanup
-./examples/run.sh carapi
-
-# Or keep the container running to explore interactively
-./examples/run.sh carapi --no-cleanup
-psql postgresql://postgres:postgres@localhost:54322/postgres
-
-# Tear down manually when done
-docker compose -f examples/docker-compose.yml down -v
-```
-
-> All queries below hit the live CarAPI. No API key or authentication is needed. Free demo data covers model years **2015-2020** only.
-
----
-
 ## Server Configuration
 
 ```sql

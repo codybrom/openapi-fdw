@@ -2,30 +2,6 @@
 
 Query the [Meta Threads API](https://developers.facebook.com/docs/threads) using SQL. This example demonstrates authenticated API access, cursor-based pagination, path parameter substitution, and query param pushdown.
 
-## Quick Start
-
-**Prerequisites:** Docker, Rust 1.88+, `cargo-component` v0.21.1, `wasm32-unknown-unknown` target, and a [Threads access token](https://developers.facebook.com/docs/threads/get-started).
-
-```bash
-# Create .env with your tokens (one file for all authenticated examples)
-cp examples/.env.example examples/.env
-# edit .env with your Threads access token
-
-# Run tests and auto-cleanup
-./examples/run.sh threads
-
-# Or keep the container running to explore interactively
-./examples/run.sh threads --no-cleanup
-psql postgresql://postgres:postgres@localhost:54322/postgres
-
-# Tear down manually when done
-docker compose -f examples/docker-compose.yml down -v
-```
-
-> All queries below hit the live Threads API. Results will reflect your real account data.
-
----
-
 ## Server Configuration
 
 ```sql

@@ -2,26 +2,6 @@
 
 Query the [PokéAPI](https://pokeapi.co/) using SQL. This example demonstrates the OpenAPI FDW against a free, no-auth API with **offset-based pagination** and auto-detected `results` wrapper key.
 
-## Quick Start
-
-**Prerequisites:** Docker, Rust 1.88+, `cargo-component` v0.21.1, `wasm32-unknown-unknown` target.
-
-```bash
-# Run tests and auto-cleanup
-./examples/run.sh pokeapi
-
-# Or keep the container running to explore interactively
-./examples/run.sh pokeapi --no-cleanup
-psql postgresql://postgres:postgres@localhost:54322/postgres
-
-# Tear down manually when done
-docker compose -f examples/docker-compose.yml down -v
-```
-
-> All queries below hit the live PokéAPI. No API key or authentication is needed.
-
----
-
 ## Server Configuration
 
 ```sql

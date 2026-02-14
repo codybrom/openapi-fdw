@@ -2,32 +2,32 @@
 # Unified test runner for examples.
 #
 # Usage:
-#   ./examples/run.sh                  Run all examples
-#   ./examples/run.sh nws              Run a single example
-#   ./examples/run.sh nws pokeapi      Run specific examples
-#   ./examples/run.sh --no-cleanup     Keep container running after tests
-#   ./examples/run.sh nws --no-cleanup Run one example, keep it running
+#   ./test/run-examples.sh                  Run all examples
+#   ./test/run-examples.sh nws              Run a single example
+#   ./test/run-examples.sh nws pokeapi      Run specific examples
+#   ./test/run-examples.sh --no-cleanup     Keep container running after tests
+#   ./test/run-examples.sh nws --no-cleanup Run one example, keep it running
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CLEANUP=true
 EXAMPLES=()
 ALL_EXAMPLES=(nws carapi pokeapi github threads)
-COMPOSE="examples/docker-compose.yml"
+COMPOSE="test/docker-compose.yml"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
     --no-cleanup) CLEANUP=false; shift ;;
     -h|--help)
-      echo "Usage: ./examples/run.sh [EXAMPLE...] [--no-cleanup]"
+      echo "Usage: ./test/run-examples.sh [EXAMPLE...] [--no-cleanup]"
       echo ""
       echo "Examples: ${ALL_EXAMPLES[*]}"
       echo ""
       echo "Options:"
       echo "  --no-cleanup  Keep Docker container running after tests"
       echo ""
-      echo "Authenticated examples (github, threads) require tokens in examples/.env."
-      echo "See examples/.env.example for the template."
+      echo "Authenticated examples (github, threads) require tokens in test/.env."
+      echo "See test/.env.example for the template."
       exit 0
       ;;
     *)
@@ -52,9 +52,9 @@ for ex in "${EXAMPLES[@]}"; do
 done
 
 # Load env vars for authenticated examples
-if [ -f "examples/.env" ]; then
+if [ -f "test/.env" ]; then
   set -a
-  source examples/.env
+  source test/.env
   set +a
 fi
 
@@ -124,14 +124,14 @@ check_auth() {
     github)
       if [ -z "${GITHUB_TOKEN:-}" ]; then
         echo "ERROR: GITHUB_TOKEN not set."
-        echo "  cp examples/.env.example examples/.env  # then add your token"
+        echo "  cp test/.env.example test/.env  # then add your token"
         exit 1
       fi
       ;;
     threads)
       if [ -z "${THREADS_ACCESS_TOKEN:-}" ]; then
         echo "ERROR: THREADS_ACCESS_TOKEN not set."
-        echo "  cp examples/.env.example examples/.env  # then add your token"
+        echo "  cp test/.env.example test/.env  # then add your token"
         exit 1
       fi
       ;;
