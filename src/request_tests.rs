@@ -373,3 +373,84 @@ fn test_page_size_zero_no_param() {
     let fdw = make_fdw_for_page_size(0, Some(5));
     assert_eq!(get_page_size_param(&fdw), None);
 }
+
+// --- fetch_spec with spec_json tests ---
+
+const MINIMAL_SPEC_JSON: &str = r#"{
+    "openapi": "3.0.0",
+    "info": { "title": "Test", "version": "1.0" },
+    "servers": [{ "url": "https://api.example.com" }],
+    "paths": {
+        "/items": {
+            "get": {
+                "responses": { "200": { "description": "OK" } }
+            }
+        }
+    }
+}"#;
+
+#[test]
+fn test_fetch_spec_from_spec_json() {
+    let mut fdw = OpenApiFdw {
+        config: ServerConfig {
+            spec_json: Some(MINIMAL_SPEC_JSON.to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    fdw.fetch_spec().unwrap();
+    assert!(fdw.spec.is_some());
+    assert_eq!(fdw.config.base_url, "https://api.example.com");
+}
+
+#[test]
+fn test_fetch_spec_from_spec_json_preserves_explicit_base_url() {
+    let mut fdw = OpenApiFdw {
+        config: ServerConfig {
+            base_url: "https://custom.example.com".to_string(),
+            spec_json: Some(MINIMAL_SPEC_JSON.to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    fdw.fetch_spec().unwrap();
+    assert!(fdw.spec.is_some());
+    assert_eq!(fdw.config.base_url, "https://custom.example.com");
+}
+
+#[test]
+fn test_fetch_spec_from_spec_json_invalid_json() {
+    let mut fdw = OpenApiFdw {
+        config: ServerConfig {
+            spec_json: Some("{ not valid json".to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let err = fdw.fetch_spec().unwrap_err();
+    assert!(err.contains("Invalid spec_json"));
+}
+
+#[test]
+fn test_fetch_spec_from_spec_json_too_large() {
+    let mut fdw = OpenApiFdw {
+        config: ServerConfig {
+            spec_json: Some("x".repeat(200)),
+            max_response_bytes: 100,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let err = fdw.fetch_spec().unwrap_err();
+    assert!(err.contains("spec_json too large"));
+    assert!(err.contains("200 bytes"));
+    assert!(err.contains("limit: 100 bytes"));
+}
+
+#[test]
+fn test_fetch_spec_neither_url_nor_json() {
+    let mut fdw = OpenApiFdw::default();
+    // Neither spec_url nor spec_json set → succeeds but spec stays None
+    fdw.fetch_spec().unwrap();
+    assert!(fdw.spec.is_none());
+}

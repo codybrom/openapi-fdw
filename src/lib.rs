@@ -203,8 +203,14 @@ impl Guest for OpenApiFdw {
             validate_url(&this.config.base_url, "base_url")?;
         }
 
-        // Get spec_url for import_foreign_schema
+        // Get spec_url / spec_json for import_foreign_schema
         this.config.spec_url = opts.get("spec_url");
+        this.config.spec_json = opts.get("spec_json");
+
+        // Validate mutual exclusivity
+        if this.config.spec_url.is_some() && this.config.spec_json.is_some() {
+            return Err("Cannot use both spec_url and spec_json. Choose one.".to_string());
+        }
 
         // Whether to include an 'attrs' jsonb column in IMPORT FOREIGN SCHEMA output
         this.config.include_attrs = opts
@@ -452,7 +458,7 @@ impl Guest for OpenApiFdw {
         let spec = this
             .spec
             .as_ref()
-            .ok_or("No OpenAPI spec available. Set spec_url in server options.")?;
+            .ok_or("No OpenAPI spec available. Set spec_url or spec_json in server options.")?;
 
         // Determine filter based on import statement
         let (filter, exclude) = match stmt.list_type {

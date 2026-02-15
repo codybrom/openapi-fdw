@@ -81,6 +81,27 @@ impl OpenApiFdw {
 
             self.spec = Some(spec);
             stats::inc_stats(FDW_NAME, stats::Metric::BytesIn, resp.body.len() as i64);
+        } else if let Some(ref raw_json) = self.config.spec_json {
+            if raw_json.len() > self.config.max_response_bytes {
+                return Err(format!(
+                    "OpenAPI spec_json too large: {} bytes (limit: {} bytes). \
+                     Increase max_response_bytes server option if needed.",
+                    raw_json.len(),
+                    self.config.max_response_bytes
+                ));
+            }
+
+            let spec_json: JsonValue =
+                serde_json::from_str(raw_json).map_err(|e| format!("Invalid spec_json: {e}"))?;
+            let spec = OpenApiSpec::from_json(spec_json)?;
+
+            if self.config.base_url.is_empty() {
+                if let Some(url) = spec.base_url() {
+                    self.config.base_url = url.trim_end_matches('/').to_string();
+                }
+            }
+
+            self.spec = Some(spec);
         }
         Ok(())
     }

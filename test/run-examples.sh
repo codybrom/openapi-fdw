@@ -185,11 +185,6 @@ load_example() {
       " > /dev/null 2>&1
       ;;
     threads)
-      local container
-      container=$(docker compose -f "$COMPOSE" ps -q db)
-      docker cp examples/threads/threads-openapi.json "$container":/threads-openapi.json
-      docker compose -f "$COMPOSE" exec -T db chmod 644 /threads-openapi.json
-      docker compose -f "$COMPOSE" exec -T -d db python3 -m http.server 8888 --directory /
       psql_cmd -c "
         ALTER SERVER threads OPTIONS (SET api_key '${THREADS_ACCESS_TOKEN}');
         ALTER SERVER threads_debug OPTIONS (SET api_key '${THREADS_ACCESS_TOKEN}');

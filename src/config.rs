@@ -20,6 +20,7 @@ pub(crate) struct ServerConfig {
     pub(crate) base_url: String,
     pub(crate) headers: Vec<(String, String)>,
     pub(crate) spec_url: Option<String>,
+    pub(crate) spec_json: Option<String>,
     pub(crate) api_key_query: Option<(String, String)>,
     pub(crate) include_attrs: bool,
     pub(crate) page_size: usize,
@@ -44,6 +45,13 @@ impl std::fmt::Debug for ServerConfig {
             .field("headers", &format!("[{} header(s)]", self.headers.len()))
             .field("spec_url", &self.spec_url)
             .field(
+                "spec_json",
+                &self
+                    .spec_json
+                    .as_ref()
+                    .map(|s| format!("[{} bytes]", s.len())),
+            )
+            .field(
                 "api_key_query",
                 &self
                     .api_key_query
@@ -67,6 +75,7 @@ impl Default for ServerConfig {
             base_url: String::new(),
             headers: Vec::new(),
             spec_url: None,
+            spec_json: None,
             api_key_query: None,
             include_attrs: false,
             page_size: 0,

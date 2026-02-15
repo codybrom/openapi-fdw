@@ -205,8 +205,9 @@ where zone_id = 'OKC143';
 
 | Option | Required | Default | Description |
 | -------- | ---------- | --------- | ------------- |
-| `base_url` | yes* | | API base URL. *Optional if `spec_url` provides servers. |
-| `spec_url` | no | | URL to OpenAPI 3.0+ JSON spec. Required for `IMPORT FOREIGN SCHEMA`. |
+| `base_url` | yes* | | API base URL. *Optional if `spec_url` or `spec_json` provides servers. |
+| `spec_url` | no | | URL to OpenAPI 3.0+ JSON spec for `IMPORT FOREIGN SCHEMA`. Mutually exclusive with `spec_json`. |
+| `spec_json` | no | | Inline OpenAPI 3.0+ JSON spec for `IMPORT FOREIGN SCHEMA`. Mutually exclusive with `spec_url`. Useful when the API doesn't publish a spec URL. |
 | `api_key` | no | | API key (inline) |
 | `api_key_id` | no | | Vault secret ID for API key |
 | `bearer_token` | no | | Bearer token (inline) |

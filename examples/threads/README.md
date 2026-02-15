@@ -430,9 +430,11 @@ INFO:  [openapi_fdw] HTTP GET https://graph.threads.net/keyword_search?... -> 20
 INFO:  [openapi_fdw] Scan complete: 3 rows, 2 columns
 ```
 
-## 11. IMPORT FOREIGN SCHEMA
+## 11. IMPORT FOREIGN SCHEMA (Inline `spec_json`)
 
-Auto-generate table definitions from the bundled OpenAPI spec. Only non-parameterized endpoints are auto-imported:
+This example uses `spec_json` to provide the OpenAPI spec directly in the server definition, rather than fetching it from a URL with `spec_url`. This is useful when the API doesn't publish a spec, or when you want to provide a trimmed/customized version.
+
+Auto-generate table definitions from the inline spec. Only non-parameterized GET endpoints are auto-imported:
 
 ```sql
 CREATE SCHEMA IF NOT EXISTS threads_auto;
