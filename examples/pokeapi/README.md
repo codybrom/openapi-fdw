@@ -8,7 +8,7 @@ Query the [PokéAPI](https://pokeapi.co/) using SQL. This example demonstrates t
 create server pokeapi
   foreign data wrapper wasm_wrapper
   options (
-    fdw_package_url 'file:///openapi_fdw.wasm',
+    fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.2.0/openapi_fdw.wasm',
     fdw_package_name 'supabase:openapi-fdw',
     fdw_package_version '0.2.0',
     base_url 'https://pokeapi.co/api/v2',

@@ -8,7 +8,7 @@ Query the [Meta Threads API](https://developers.facebook.com/docs/threads) using
 create server threads
   foreign data wrapper wasm_wrapper
   options (
-    fdw_package_url 'file:///openapi_fdw.wasm',
+    fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.2.0/openapi_fdw.wasm',
     fdw_package_name 'supabase:openapi-fdw',
     fdw_package_version '0.2.0',
     base_url 'https://graph.threads.net',
@@ -432,9 +432,17 @@ INFO:  [openapi_fdw] Scan complete: 3 rows, 2 columns
 
 ## 11. IMPORT FOREIGN SCHEMA (Inline `spec_json`)
 
-This example uses `spec_json` to provide the OpenAPI spec directly in the server definition, rather than fetching it from a URL with `spec_url`. This is useful when the API doesn't publish a spec, or when you want to provide a trimmed/customized version.
+Meta's Threads API does not publish an official OpenAPI spec at a public URL. Instead of `spec_url`, this example uses `spec_json` to provide a hand-written spec directly in the server definition. The inline spec describes just the 8 GET endpoints used by this example.
 
-Auto-generate table definitions from the inline spec. Only non-parameterized GET endpoints are auto-imported:
+This approach also works well for APIs that:
+
+- Don't publish an OpenAPI spec at all (like Threads)
+- Publish a spec that's too large, outdated, or inaccurate
+- Need a customized subset of endpoints
+
+The FDW parses the inline JSON the same way it would a fetched spec, auto-generating `CREATE FOREIGN TABLE` statements with correct column names and types. Endpoints with path parameters (`/{thread_id}/replies`, `/{thread_id}/conversation`) are skipped — those need manual table definitions like the ones above.
+
+Auto-generate table definitions from the inline spec:
 
 ```sql
 CREATE SCHEMA IF NOT EXISTS threads_auto;

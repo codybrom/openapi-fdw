@@ -8,7 +8,7 @@ Query the [GitHub REST API](https://docs.github.com/en/rest) using SQL. This exa
 create server github
   foreign data wrapper wasm_wrapper
   options (
-    fdw_package_url 'file:///openapi_fdw.wasm',
+    fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.2.0/openapi_fdw.wasm',
     fdw_package_name 'supabase:openapi-fdw',
     fdw_package_version '0.2.0',
     base_url 'https://api.github.com',

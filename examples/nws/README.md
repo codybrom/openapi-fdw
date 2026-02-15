@@ -8,7 +8,7 @@ Query the [National Weather Service API](https://www.weather.gov/documentation/s
 create server nws
   foreign data wrapper wasm_wrapper
   options (
-    fdw_package_url 'file:///openapi_fdw.wasm',
+    fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.2.0/openapi_fdw.wasm',
     fdw_package_name 'supabase:openapi-fdw',
     fdw_package_version '0.2.0',
     base_url 'https://api.weather.gov',
