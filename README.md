@@ -28,10 +28,10 @@ create foreign data wrapper wasm_wrapper
 create server my_api_server
   foreign data wrapper wasm_wrapper
   options (
-    fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.1.4/openapi_fdw.wasm',
+    fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.2.0/openapi_fdw.wasm',
     fdw_package_name 'supabase:openapi-fdw',
-    fdw_package_version '0.1.4',
-    fdw_package_checksum '4da6825be678a990623e213f205ef50d57517ab51aa12023b2fb54dd4e604ee0',
+    fdw_package_version '0.2.0',
+    fdw_package_checksum '<sha256-checksum>',
     base_url 'https://api.example.com',
     spec_url 'https://api.example.com/openapi.json'
   );
@@ -57,10 +57,10 @@ select * from users limit 10;
 create server weather_api
   foreign data wrapper wasm_wrapper
   options (
-    fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.1.4/openapi_fdw.wasm',
+    fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.2.0/openapi_fdw.wasm',
     fdw_package_name 'supabase:openapi-fdw',
-    fdw_package_version '0.1.4',
-    fdw_package_checksum '4da6825be678a990623e213f205ef50d57517ab51aa12023b2fb54dd4e604ee0',
+    fdw_package_version '0.2.0',
+    fdw_package_checksum '<sha256-checksum>',
     base_url 'https://api.weather.gov',
     spec_url 'https://api.weather.gov/openapi.json',
     user_agent 'openapi-fdw'
@@ -86,10 +86,10 @@ Then reference the Vault secret ID:
 create server my_api
   foreign data wrapper wasm_wrapper
   options (
-    fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.1.4/openapi_fdw.wasm',
+    fdw_package_url 'https://github.com/codybrom/openapi-fdw/releases/download/v0.2.0/openapi_fdw.wasm',
     fdw_package_name 'supabase:openapi-fdw',
-    fdw_package_version '0.1.4',
-    fdw_package_checksum '4da6825be678a990623e213f205ef50d57517ab51aa12023b2fb54dd4e604ee0',
+    fdw_package_version '0.2.0',
+    fdw_package_checksum '<sha256-checksum>',
     base_url 'https://api.example.com/v1',
     spec_url 'https://api.example.com/openapi.json',
     api_key_id '<vault_secret_id>'
@@ -100,6 +100,18 @@ Or pass the key inline (for non-Supabase setups):
 
 ```sql
     api_key 'sk-your-api-key-here'
+```
+
+By default, the API key is sent as a header. Use `api_key_location` to send it as a query parameter or cookie instead:
+
+```sql
+    api_key 'sk-your-api-key-here',
+    api_key_location 'query'   -- sends as ?api_key=sk-... (uses api_key_header as param name)
+```
+
+```sql
+    api_key 'sk-your-api-key-here',
+    api_key_location 'cookie'  -- sends as Cookie header
 ```
 
 ### Manual Table Definition
@@ -145,6 +157,27 @@ options (
 select title, body from user_posts where user_id = '123';
 ```
 
+### POST-for-Read Endpoints
+
+Some APIs use POST requests for read operations (e.g., search or query endpoints). Use the `method` and `request_body` table options:
+
+```sql
+create foreign table search_results (
+    id text,
+    title text,
+    score real,
+    attrs jsonb
+)
+server my_api
+options (
+    endpoint '/search',
+    method 'POST',
+    request_body '{"query": "openapi", "limit": 50}'
+);
+
+select id, title, score from search_results;
+```
+
 ### GeoJSON / Nested Responses
 
 Use `response_path` and `object_path` to dig into wrapped or nested response structures:
@@ -172,8 +205,9 @@ where zone_id = 'OKC143';
 
 | Option | Required | Default | Description |
 | -------- | ---------- | --------- | ------------- |
-| `base_url` | yes* | | API base URL. *Optional if `spec_url` provides servers. |
-| `spec_url` | no | | URL to OpenAPI 3.0+ JSON spec. Required for `IMPORT FOREIGN SCHEMA`. |
+| `base_url` | yes* | | API base URL. *Optional if `spec_url` or `spec_json` provides servers. |
+| `spec_url` | no | | URL to OpenAPI 3.0+ JSON spec for `IMPORT FOREIGN SCHEMA`. Mutually exclusive with `spec_json`. |
+| `spec_json` | no | | Inline OpenAPI 3.0+ JSON spec for `IMPORT FOREIGN SCHEMA`. Mutually exclusive with `spec_url`. Useful when the API doesn't publish a spec URL. |
 | `api_key` | no | | API key (inline) |
 | `api_key_id` | no | | Vault secret ID for API key |
 | `bearer_token` | no | | Bearer token (inline) |
@@ -186,6 +220,10 @@ where zone_id = 'OKC143';
 | `page_size` | no | `0` | Records per page (`0` = no limit param sent) |
 | `page_size_param` | no | `limit` | Query param name for page size |
 | `cursor_param` | no | `after` | Query param name for pagination cursor |
+| `api_key_location` | no | `header` | Where to send API key: `header`, `query`, or `cookie` |
+| `max_pages` | no | `1000` | Max pages per scan (prevents infinite pagination loops) |
+| `max_response_bytes` | no | `52428800` | Max response body size in bytes (default 50 MiB) |
+| `debug` | no | `false` | Emit HTTP details and scan stats via INFO when `'true'` or `'1'` |
 | `include_attrs` | no | `true` | Include `attrs` jsonb column in `IMPORT FOREIGN SCHEMA` output. Set to `'false'` to omit. |
 
 ## Table Options
@@ -200,6 +238,8 @@ where zone_id = 'OKC143';
 | `cursor_param` | no | | Override server-level `cursor_param` |
 | `page_size_param` | no | | Override server-level `page_size_param` |
 | `page_size` | no | | Override server-level `page_size` |
+| `method` | no | `GET` | HTTP method (`POST` for read-via-POST endpoints) |
+| `request_body` | no | | Request body string for POST endpoints |
 
 ### Special Columns
 
@@ -211,35 +251,43 @@ where zone_id = 'OKC143';
 The FDW automatically detects:
 
 - **Pagination** — cursor-based (`has_more` + cursor fields), URL-based (`next` link), or offset-based
-- **Response wrapping** — unwraps common keys: `data`, `results`, `items`, `records`, `entries`, `features`
+- **Response wrapping** — unwraps common keys: `data`, `results`, `items`, `records`, `entries`, `features`, `@graph`
 - **Column names** — `camelCase` in the API response maps to `snake_case` PostgreSQL columns
 
 ## Development
 
-### Building
+Requires Rust 1.88+, `wasm32-unknown-unknown` target, and `cargo-component` v0.21.1.
 
 ```bash
-cargo component build --release --target wasm32-unknown-unknown
+make build      # cargo component build --release (WASM binary)
+make test       # cargo test (unit tests)
+make fmt        # cargo fmt
+make clippy     # clippy with -D warnings
+make check      # runs all of the above in sequence
 ```
 
-### Running Tests
+### Integration Tests
+
+Integration tests run against a Docker-based MockServer:
 
 ```bash
-cargo test
+bash test/run.sh    # requires Docker
 ```
 
 ## Limitations
 
 - Read-only (no INSERT/UPDATE/DELETE support)
-- Only GET endpoints are supported
+- Only GET endpoints are supported (POST-for-read is available via the `method` table option)
 - Authentication limited to API key and Bearer token (No OAuth2 flow support yet - use pre-obtained tokens)
+- Only OpenAPI 3.x specs are supported (Swagger 2.0 is rejected)
 
 ## Changelog
 
-| Version | Date       | Notes                                                       |
-| ------- | ---------- | ----------------------------------------------------------- |
-| 0.1.4   | 2026-02-09 | Type coercion, auth validation, table naming, URL fixes, include_attrs option |
-| 0.1.3   | 2026-02-07 | Perf: avoid cloning JSON response data during row extraction |
-| 0.1.2   | 2026-02-06 | Fix: prefer WHERE clause value for query/path param columns |
-| 0.1.1   | 2026-02-06 | Fix: inject query param values back into result rows        |
-| 0.1.0   | 2026-01-25 | Initial version                                             |
+| Version | Date       | Notes                                                                                         |
+| ------- | ---------- | --------------------------------------------------------------------------------------------- |
+| 0.2.0   | 2026-02-15 | Modular architecture (7 modules), POST-for-read, `spec_json` inline specs, LIMIT→page_size pushdown, OpenAPI 3.1 support, security hardening (URL encoding, body size limits, pagination loop detection, credential redaction), 518 unit tests + 113 integration assertions, 5 real-world examples (NWS, CarAPI, PokéAPI, GitHub, Threads) |
+| 0.1.4   | 2026-02-09 | Type coercion, auth validation, table naming, URL fixes, include_attrs option                 |
+| 0.1.3   | 2026-02-07 | Perf: avoid cloning JSON response data during row extraction                                  |
+| 0.1.2   | 2026-02-06 | Fix: prefer WHERE clause value for query/path param columns                                   |
+| 0.1.1   | 2026-02-06 | Fix: inject query param values back into result rows                                          |
+| 0.1.0   | 2026-01-25 | Initial version                                                                               |
