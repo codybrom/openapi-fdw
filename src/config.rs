@@ -77,7 +77,7 @@ impl Default for ServerConfig {
             spec_url: None,
             spec_json: None,
             api_key_query: None,
-            include_attrs: false,
+            include_attrs: true,
             page_size: 0,
             page_size_param: String::new(),
             cursor_param: String::new(),
@@ -169,6 +169,22 @@ impl ServerConfig {
             opts.get("bearer_token_id")
                 .and_then(|token_id| utils::get_vault_secret(&token_id))
         });
+
+        // Warn on empty credentials (likely vault misconfiguration)
+        if let Some(ref key) = api_key {
+            if key.trim().is_empty() {
+                utils::report_warning(
+                    "[openapi_fdw] api_key is empty. Requests may fail authentication.",
+                );
+            }
+        }
+        if let Some(ref token) = bearer_token {
+            if token.trim().is_empty() {
+                utils::report_warning(
+                    "[openapi_fdw] bearer_token is empty. Requests may fail authentication.",
+                );
+            }
+        }
 
         let location = opts.require_or("api_key_location", "header");
         let header = opts.require_or("api_key_header", "Authorization");

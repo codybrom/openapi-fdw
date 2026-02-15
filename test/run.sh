@@ -93,17 +93,35 @@ docker compose -f test/docker-compose.yml up -d
 
 echo "Waiting for MockServer..."
 for i in $(seq 1 60); do
-  if curl -sf --max-time 2 http://localhost:1080/mockserver/status > /dev/null 2>&1; then
+  if curl -sf --max-time 2 -X PUT http://localhost:1080/mockserver/status > /dev/null 2>&1; then
     echo "MockServer ready after ${i}s"
     break
   fi
   sleep 1
 done
+if ! curl -sf --max-time 2 -X PUT http://localhost:1080/mockserver/status > /dev/null 2>&1; then
+  echo "ERROR: MockServer failed to start within 60s"
+  docker compose -f test/docker-compose.yml logs mockserver
+  exit 1
+fi
+
+echo "Loading MockServer expectations..."
+curl -sf -X PUT http://localhost:1080/mockserver/expectation -d @test/expectations.json > /dev/null
+echo "MockServer expectations loaded"
 
 echo "Waiting for Postgres..."
-until docker compose -f test/docker-compose.yml exec -T db pg_isready -U supabase_admin > /dev/null 2>&1; do
+for i in $(seq 1 120); do
+  if docker compose -f test/docker-compose.yml exec -T db pg_isready -U supabase_admin > /dev/null 2>&1; then
+    echo "Postgres ready after ${i}s"
+    break
+  fi
   sleep 1
 done
+if ! docker compose -f test/docker-compose.yml exec -T db pg_isready -U supabase_admin > /dev/null 2>&1; then
+  echo "ERROR: Postgres failed to start within 120s"
+  docker compose -f test/docker-compose.yml logs db
+  exit 1
+fi
 sleep 3  # wait for init scripts
 
 echo ""

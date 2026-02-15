@@ -224,7 +224,7 @@ impl OpenApiFdw {
                     endpoint = format!("{}{}", &endpoint[..start], &endpoint[start + end + 1..]);
                 }
             } else {
-                break;
+                return Err(format!("Unclosed '{{' in endpoint template: {endpoint}"));
             }
         }
 
@@ -263,7 +263,7 @@ impl OpenApiFdw {
         if let Some(cursor) = self.pagination.next.as_ref().and_then(|t| t.as_cursor()) {
             params.push(format!(
                 "{}={}",
-                self.config.cursor_param,
+                urlencoding::encode(&self.config.cursor_param),
                 urlencoding::encode(cursor)
             ));
         }
@@ -276,7 +276,8 @@ impl OpenApiFdw {
             };
             params.push(format!(
                 "{}={}",
-                self.config.page_size_param, effective_size
+                urlencoding::encode(&self.config.page_size_param),
+                effective_size
             ));
         }
 
@@ -334,7 +335,17 @@ impl OpenApiFdw {
     pub(crate) fn build_url(&mut self, ctx: &Context) -> Result<String, String> {
         // Use next_url for pagination if available (injected_params unchanged)
         if let Some(next_url) = self.pagination.next.as_ref().and_then(|t| t.as_url()) {
-            return self.resolve_pagination_url(next_url);
+            let mut url = self.resolve_pagination_url(next_url)?;
+            if let Some((ref param_name, ref param_value)) = self.config.api_key_query {
+                let separator = if url.contains('?') { '&' } else { '?' };
+                url.push(separator);
+                url.push_str(&format!(
+                    "{}={}",
+                    urlencoding::encode(param_name),
+                    urlencoding::encode(param_value)
+                ));
+            }
+            return Ok(url);
         }
 
         let quals = ctx.get_quals();

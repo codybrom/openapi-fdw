@@ -537,12 +537,34 @@ impl EndpointInfo {
     pub fn table_name(&self) -> String {
         let cleaned = self.path.trim_matches('/');
 
-        let base = if cleaned.is_empty() {
+        let mut base = if cleaned.is_empty() {
             "unknown".to_string()
         } else {
             // Join path segments with '_' and convert kebab-case to snake_case
-            cleaned.replace(['/', '-'], "_")
+            let mut name = cleaned.replace(['/', '-'], "_");
+            // Replace remaining non-alphanumeric/non-underscore chars with '_'
+            name = name
+                .chars()
+                .map(|c| {
+                    if c.is_alphanumeric() || c == '_' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            // Collapse consecutive underscores
+            while name.contains("__") {
+                name = name.replace("__", "_");
+            }
+            // Trim trailing underscores
+            name.trim_end_matches('_').to_string()
         };
+
+        // Prepend '_' if starts with digit
+        if base.starts_with(|c: char| c.is_ascii_digit()) {
+            base.insert(0, '_');
+        }
 
         if self.method == "POST" {
             format!("{base}_post")

@@ -39,9 +39,9 @@ fn test_default_debug_off() {
 }
 
 #[test]
-fn test_default_include_attrs_off() {
+fn test_default_include_attrs_on() {
     let config = ServerConfig::default();
-    assert!(!config.include_attrs);
+    assert!(config.include_attrs);
 }
 
 // --- save_pagination_defaults / restore_pagination_defaults ---

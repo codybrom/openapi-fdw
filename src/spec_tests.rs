@@ -5479,3 +5479,55 @@ fn test_parent_nullable_propagates_to_composition() {
     assert!(resolved.properties.contains_key("field"));
     assert!(resolved.nullable, "parent nullable should propagate");
 }
+
+// --- Fix 8: table_name sanitization ---
+
+#[test]
+fn test_table_name_with_dots() {
+    let endpoint = EndpointInfo {
+        path: "/api/v1.0/items".to_string(),
+        method: "GET",
+        response_schema: None,
+    };
+    assert_eq!(endpoint.table_name(), "api_v1_0_items");
+}
+
+#[test]
+fn test_table_name_with_at_sign() {
+    let endpoint = EndpointInfo {
+        path: "/@user/repos".to_string(),
+        method: "GET",
+        response_schema: None,
+    };
+    assert_eq!(endpoint.table_name(), "_user_repos");
+}
+
+#[test]
+fn test_table_name_leading_digit() {
+    let endpoint = EndpointInfo {
+        path: "/3d-models".to_string(),
+        method: "GET",
+        response_schema: None,
+    };
+    assert_eq!(endpoint.table_name(), "_3d_models");
+}
+
+#[test]
+fn test_table_name_post_with_special_chars() {
+    let endpoint = EndpointInfo {
+        path: "/search.json".to_string(),
+        method: "POST",
+        response_schema: None,
+    };
+    assert_eq!(endpoint.table_name(), "search_json_post");
+}
+
+#[test]
+fn test_table_name_multiple_special_chars() {
+    let endpoint = EndpointInfo {
+        path: "/api/v2.1/@me/data".to_string(),
+        method: "GET",
+        response_schema: None,
+    };
+    assert_eq!(endpoint.table_name(), "api_v2_1_me_data");
+}

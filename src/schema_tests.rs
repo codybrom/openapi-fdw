@@ -815,23 +815,23 @@ fn test_generate_foreign_table_single_quote_in_endpoint() {
 
 #[test]
 fn test_quote_identifier_with_double_quote() {
-    // Table name with double quote — should be doubled in identifier quoting
+    // Table name with double quote — sanitized to underscore by table_name()
     let endpoint = crate::spec::EndpointInfo {
         path: "/he\"llo".to_string(),
         method: "GET",
         response_schema: None,
     };
     let table_name = endpoint.table_name();
-    assert_eq!(table_name, "he\"llo");
+    assert_eq!(table_name, "he_llo");
 
-    // The DDL should handle the double-quote
+    // The DDL uses the sanitized name
     let spec =
         OpenApiSpec::from_str(r#"{"openapi": "3.0.0", "info": {"title": "T"}, "paths": {}}"#)
             .unwrap();
     let ddl = generate_foreign_table(&endpoint, &spec, "test_server", false);
     assert!(
-        ddl.contains(r#""he""llo""#),
-        "Double quotes should be doubled: {ddl}"
+        ddl.contains(r#""he_llo""#),
+        "Sanitized table name should appear in DDL: {ddl}"
     );
 }
 

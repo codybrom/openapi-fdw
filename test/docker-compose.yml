@@ -3,10 +3,7 @@ services:
     image: mockserver/mockserver:mockserver-5.15.0
     ports:
       - "1080:1080"
-    environment:
-      MOCKSERVER_INITIALIZATION_JSON_PATH: /config/expectations.json
     volumes:
-      - ./expectations.json:/config/expectations.json:ro
       - ./mock-spec.json:/config/mock-spec.json:ro
 
   db:

@@ -653,10 +653,10 @@ fn test_json_to_cell_timestamptz_from_unix() {
 fn test_json_to_cell_uuid() {
     let obj = serde_json::json!({"uid": "550e8400-e29b-41d4-a716-446655440000"});
     let cell = cell_from_json("uid", TypeOid::Uuid, &obj).unwrap();
-    assert_eq!(
-        cell_to_string(cell.as_ref().unwrap()),
-        Some("550e8400-e29b-41d4-a716-446655440000".to_string())
-    );
+    assert!(matches!(
+        cell,
+        Some(Cell::Uuid(ref s)) if s == "550e8400-e29b-41d4-a716-446655440000"
+    ));
 }
 
 #[test]

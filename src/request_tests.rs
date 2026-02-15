@@ -1,5 +1,6 @@
 use super::*;
 use crate::config::ServerConfig;
+use crate::pagination::PaginationState;
 
 // --- resolve_pagination_url tests ---
 
@@ -453,4 +454,74 @@ fn test_fetch_spec_neither_url_nor_json() {
     // Neither spec_url nor spec_json set → succeeds but spec stays None
     fdw.fetch_spec().unwrap();
     assert!(fdw.spec.is_none());
+}
+
+// --- Fix 1: api_key_query appended to URL-based pagination ---
+
+#[test]
+fn test_resolve_pagination_url_appends_api_key_query() {
+    let fdw = OpenApiFdw {
+        config: ServerConfig {
+            base_url: "https://api.example.com".to_string(),
+            api_key_query: Some(("api_key".to_string(), "secret123".to_string())),
+            ..Default::default()
+        },
+        endpoint: "/items".to_string(),
+        pagination: PaginationState {
+            next: Some(crate::pagination::PaginationToken::Url(
+                "https://api.example.com/items?page=2".to_string(),
+            )),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    // Simulate what build_url does for URL-based pagination
+    let next_url = fdw.pagination.next.as_ref().unwrap().as_url().unwrap();
+    let mut url = fdw.resolve_pagination_url(next_url).unwrap();
+    if let Some((ref param_name, ref param_value)) = fdw.config.api_key_query {
+        let separator = if url.contains('?') { '&' } else { '?' };
+        url.push(separator);
+        url.push_str(&format!(
+            "{}={}",
+            urlencoding::encode(param_name),
+            urlencoding::encode(param_value)
+        ));
+    }
+    assert_eq!(
+        url,
+        "https://api.example.com/items?page=2&api_key=secret123"
+    );
+}
+
+#[test]
+fn test_resolve_pagination_url_no_api_key_unchanged() {
+    let fdw = make_fdw_for_url("https://api.example.com", "/items");
+    let url = fdw
+        .resolve_pagination_url("https://api.example.com/items?page=2")
+        .unwrap();
+    // No api_key_query configured → URL unchanged
+    assert_eq!(url, "https://api.example.com/items?page=2");
+}
+
+// --- Fix 7: Unclosed '{' in endpoint template ---
+
+#[test]
+fn test_substitute_path_params_unclosed_brace_error() {
+    let mut injected = std::collections::HashMap::new();
+    let result = OpenApiFdw::substitute_path_params("/items/{id", &[], &mut injected);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.contains("Unclosed '{'"));
+    assert!(err.contains("/items/{id"));
+}
+
+#[test]
+fn test_substitute_path_params_unclosed_brace_after_valid() {
+    let mut injected = std::collections::HashMap::new();
+    // First param is valid, second is unclosed
+    let result =
+        OpenApiFdw::substitute_path_params("/users/{user_id}/posts/{title", &[], &mut injected);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("Unclosed '{'"));
 }

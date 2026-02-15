@@ -207,7 +207,7 @@ impl OpenApiFdw {
                         .map(wrap)
                 }
             }
-            TypeOid::Uuid => src.as_str().map(|v| Cell::String(v.to_owned())),
+            TypeOid::Uuid => src.as_str().map(|v| Cell::Uuid(v.to_owned())),
             // Json and unknown types: serialize to JSON string
             TypeOid::Json | TypeOid::Other(_) => Some(Cell::Json(src.to_string())),
         };
