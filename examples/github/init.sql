@@ -1,6 +1,8 @@
 -- OpenAPI FDW example: GitHub API
 -- Requires a GitHub personal access token (set GITHUB_TOKEN env var).
 -- See: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens
+-- Note: fdw_package_url uses file:// for local Docker testing. In production, use the
+-- GitHub release URL: https://github.com/codybrom/openapi-fdw/releases/download/v0.2.0/openapi_fdw.wasm
 
 -- Create supabase_admin role if it doesn't exist (required by wrappers extension)
 DO $$

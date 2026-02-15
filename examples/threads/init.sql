@@ -1,6 +1,8 @@
 -- OpenAPI FDW example: Threads API (Meta)
 -- Requires a Threads access token (set THREADS_ACCESS_TOKEN env var).
 -- See: https://developers.facebook.com/docs/threads
+-- Note: fdw_package_url uses file:// for local Docker testing. In production, use the
+-- GitHub release URL: https://github.com/codybrom/openapi-fdw/releases/download/v0.2.0/openapi_fdw.wasm
 
 -- Create supabase_admin role if it doesn't exist (required by wrappers extension)
 DO $$
