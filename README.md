@@ -285,7 +285,7 @@ bash test/run.sh    # requires Docker
 
 | Version | Date       | Notes                                                                                         |
 | ------- | ---------- | --------------------------------------------------------------------------------------------- |
-| 0.2.0   | 2026-02-10 | POST-for-read, OpenAPI 3.1 type arrays, new PG types, cached columns, integration tests       |
+| 0.2.0   | 2026-02-15 | Modular architecture (7 modules), POST-for-read, `spec_json` inline specs, LIMIT→page_size pushdown, OpenAPI 3.1 support, security hardening (URL encoding, body size limits, pagination loop detection, credential redaction), 509 unit tests + 80 integration assertions, 5 real-world examples (NWS, CarAPI, PokéAPI, GitHub, Threads) |
 | 0.1.4   | 2026-02-09 | Type coercion, auth validation, table naming, URL fixes, include_attrs option                 |
 | 0.1.3   | 2026-02-07 | Perf: avoid cloning JSON response data during row extraction                                  |
 | 0.1.2   | 2026-02-06 | Fix: prefer WHERE clause value for query/path param columns                                   |
