@@ -1,6 +1,7 @@
 # OpenAPI WASM Foreign Data Wrapper
 
-> **Note:** This standalone repository will be archived once the OpenAPI FDW is merged into [supabase/wrappers](https://github.com/supabase/wrappers) ([PR #566](https://github.com/supabase/wrappers/pull/566)). Future releases will be published from the main wrappers repo. Documentation will move to [fdw.dev](https://fdw.dev/).
+> [!WARNING]
+> **This repository is archived.** The OpenAPI FDW now lives in [supabase/wrappers](https://github.com/supabase/wrappers). Future development and releases will happen there. Documentation is at [fdw.dev](https://fdw.dev/catalog/openapi/).
 
 This is a WASM-based Foreign Data Wrapper (FDW) for integrating any OpenAPI 3.0+ compliant REST API into PostgreSQL through Supabase Wrappers.
 
@@ -10,7 +11,7 @@ Handles pagination, rate limiting (429 backoff), path parameter substitution fro
 
 ## Installation
 
-Requires [Supabase Wrappers](https://github.com/supabase/wrappers) >= 0.4.1.
+Requires [Supabase Wrappers](https://github.com/supabase/wrappers) >= 0.5.0.
 
 ### 1. Enable Wrappers
 
